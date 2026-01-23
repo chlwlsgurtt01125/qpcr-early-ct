@@ -1,0 +1,358 @@
+# app/streamlit_app.py
+from __future__ import annotations
+
+import io
+import re
+import sys
+import json
+import subprocess
+from datetime import datetime
+from pathlib import Path
+import numpy as np
+import pandas as pd
+import streamlit as st
+import xgboost as xgb
+
+from core.model_features import build_x_from_long
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+MODELS_DIR = PROJECT_ROOT / "data" / "models" / "by_cutoff"
+UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
+
+st.set_page_config(page_title="qPCR Ct Early Prediction", layout="wide")
+
+
+# -------------------------
+# Utilities
+# -------------------------
+def _safe_stem(name: str) -> str:
+    s = Path(name).stem
+    s = re.sub(r"[^a-zA-Z0-9_\-]+", "_", s)
+    return s[:80] if s else "uploaded"
+
+
+def discover_cutoffs(models_dir: Path) -> list[int]:
+    cutoffs: list[int] = []
+    for p in models_dir.glob("ct_xgb_cutoff_*.json"):
+        m = re.search(r"cutoff_(\d+)\.json$", p.name)
+        if m:
+            cutoffs.append(int(m.group(1)))
+    return sorted(set(cutoffs))
+
+
+@st.cache_resource
+def load_booster(cutoff: int) -> xgb.Booster:
+    model_path = MODELS_DIR / f"ct_xgb_cutoff_{cutoff}.json"
+    booster = xgb.Booster()
+    booster.load_model(str(model_path))
+    return booster
+
+
+def load_meta(cutoff: int) -> dict:
+    meta_path = MODELS_DIR / f"ct_xgb_cutoff_{cutoff}.meta.json"
+    if meta_path.exists():
+        return json.loads(meta_path.read_text(encoding="utf-8"))
+    return {}
+
+
+def _drop_unnamed(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [c for c in df.columns if str(c).lower().startswith("unnamed")]
+    return df.drop(columns=cols) if cols else df
+
+
+def infer_long_df(df: pd.DataFrame, run_id: str) -> pd.DataFrame:
+    """
+    업로드 테이블을 최대한 관대하게 long 형태로 변환.
+    최종 반환 컬럼: Cycle, Fluor, Well, run_id, well_uid
+
+    지원 포맷:
+      A) long: (Well, Cycle, Fluor/RFU/Signal)
+      B) wide-1: (Well + cycle columns "1","2",... 또는 "Cycle 1"...)
+      C) wide-2: (Cycle + well columns "C3","C5","A01"... )  <-- 너 케이스
+    """
+    df = df.copy()
+    df.columns = [str(c).strip() for c in df.columns]
+    df = _drop_unnamed(df)
+
+    cols_lower = {str(c).strip().lower(): c for c in df.columns}
+
+    # ---- A) long 형태: Cycle + (Fluor/RFU/Signal)
+    has_cycle = "cycle" in cols_lower
+    fluor_key = None
+    for k in ("fluor", "rfu", "signal"):
+        if k in cols_lower:
+            fluor_key = k
+            break
+
+    if has_cycle and fluor_key is not None:
+        cycle_col = cols_lower["cycle"]
+        fluor_col = cols_lower[fluor_key]
+        well_col = (
+            cols_lower.get("well")
+            or cols_lower.get("well position")
+            or cols_lower.get("well_position")
+        )
+
+        if well_col is None:
+            # Well이 없으면 행 번호로 임시 well 부여
+            df["Well"] = [f"R{i:03d}" for i in range(1, len(df) + 1)]
+            well_col = "Well"
+
+        out = df[[well_col, cycle_col, fluor_col]].copy()
+        out.columns = ["Well", "Cycle", "Fluor"]
+
+    # ---- C) Cycle + 여러 well 컬럼 (Cycle이 행)
+    elif has_cycle:
+        cycle_col = cols_lower["cycle"]
+        well_cols = [c for c in df.columns if c != cycle_col]
+        if not well_cols:
+            raise ValueError("Cycle 컬럼은 있는데 well 컬럼(C3, C5, A01 등)이 없어.")
+
+        long = df.melt(id_vars=[cycle_col], value_vars=well_cols, var_name="Well", value_name="Fluor")
+        long.rename(columns={cycle_col: "Cycle"}, inplace=True)
+        out = long[["Well", "Cycle", "Fluor"]].copy()
+
+    # ---- B) Well + cycle 컬럼들 (wide)
+    else:
+        well_col = None
+        for cand in ["Well", "well", "WELL"]:
+            if cand in df.columns:
+                well_col = cand
+                break
+        if well_col is None:
+            raise ValueError("Well 컬럼을 찾지 못했어. (예: Well, well)")
+
+        cycle_cols = []
+        for c in df.columns:
+            if c == well_col:
+                continue
+            if re.fullmatch(r"\d+", str(c).strip()):
+                cycle_cols.append(c)
+            elif re.search(r"cycle\s*\d+", str(c).strip(), flags=re.IGNORECASE):
+                cycle_cols.append(c)
+
+        if not cycle_cols:
+            raise ValueError("long도 아니고 wide(Well+cycle cols)도 아닌 것 같아. (Cycle+well cols도 아님)")
+
+        tmp = df[[well_col] + cycle_cols].copy()
+        long = tmp.melt(id_vars=[well_col], var_name="Cycle", value_name="Fluor")
+        long["Cycle"] = long["Cycle"].astype(str).str.extract(r"(\d+)").astype(int)
+        long.rename(columns={well_col: "Well"}, inplace=True)
+        out = long[["Well", "Cycle", "Fluor"]].copy()
+
+    # ---- 정리
+    out = out.dropna(subset=["Well", "Cycle", "Fluor"]).copy()
+    out["Cycle"] = pd.to_numeric(out["Cycle"], errors="coerce")
+    out["Fluor"] = pd.to_numeric(out["Fluor"], errors="coerce")
+    out = out.dropna(subset=["Cycle", "Fluor"]).copy()
+
+    out["Cycle"] = out["Cycle"].astype(int)
+    out["run_id"] = run_id
+    out["well_uid"] = out["run_id"].astype(str) + ":" + out["Well"].astype(str)
+
+    return out[["Cycle", "Fluor", "Well", "run_id", "well_uid"]]
+
+
+def predict_ct(df_long: pd.DataFrame, cutoff: int) -> pd.DataFrame:
+    booster = load_booster(cutoff)
+    X, meta = build_x_from_long(df_long, cutoff=cutoff)
+
+    m = load_meta(cutoff)
+    feat_cols = m.get("feat_cols") or m.get("feature_cols")  # 혹시 키 이름 다를까봐
+    if feat_cols:
+        dmat = xgb.DMatrix(X, feature_names=list(feat_cols))
+    else:
+        dmat = xgb.DMatrix(X)
+
+    pred = booster.predict(dmat)
+
+    out = meta.copy()
+    out["pred_ct"] = pred.astype(float)
+    out["cutoff_used"] = cutoff
+    return out.sort_values(["run_id", "Well"]).reset_index(drop=True)
+
+
+def run_retrain(min_cutoff: int, max_cutoff: int) -> tuple[int, str]:
+    """
+    현재 서버에 있는 canonical/master_long.parquet 기준으로 모델 전체 재학습.
+    """
+    cmd = [
+        sys.executable, "-m", "core.step3_train_and_save_models",
+        "--min_cutoff", str(min_cutoff),
+        "--max_cutoff", str(max_cutoff),
+    ]
+    p = subprocess.run(cmd, cwd=str(PROJECT_ROOT), capture_output=True, text=True)
+    log = (p.stdout or "") + "\n" + (p.stderr or "")
+    return p.returncode, log
+
+
+def read_uploaded_table(up) -> pd.DataFrame:
+    name = (up.name or "").lower()
+    raw = up.read()
+    if name.endswith(".xlsx") or name.endswith(".xls"):
+        # 엑셀
+        return pd.read_excel(io.BytesIO(raw))
+    # csv
+    return pd.read_csv(io.BytesIO(raw))
+
+
+# -------------------------
+# UI
+# -------------------------
+st.title("qPCR Ct 조기 예측 (Cutoff-based XGBoost)")
+
+cutoffs = discover_cutoffs(MODELS_DIR)
+if not cutoffs:
+    st.error(f"모델을 찾지 못했어: {MODELS_DIR} (ct_xgb_cutoff_*.json 없음)")
+    st.stop()
+
+with st.sidebar:
+    st.header("설정")
+    default_cutoff = 30 if 30 in cutoffs else cutoffs[-1]
+    cutoff = st.selectbox("Cutoff(사용 cycle 수)", cutoffs, index=cutoffs.index(default_cutoff))
+
+    st.divider()
+    st.subheader("재학습 (서버 데이터 기준)")
+    min_c = st.number_input("min_cutoff", min_value=1, max_value=200, value=1, step=1)
+    max_c = st.number_input("max_cutoff", min_value=1, max_value=200, value=40, step=1)
+
+st.caption("업로드한 qPCR curve 데이터로 Ct를 예측하거나, 서버에 누적된 데이터로 모델을 재학습할 수 있어요.")
+
+colA, colB = st.columns([1.2, 1.0], gap="large")
+
+with colA:
+    st.subheader("1) 새 데이터 테스트 (학습 없이 예측만)")
+    up = st.file_uploader(
+        "CSV/XLSX 업로드 (long: Well/Cycle/Fluor 또는 wide: Well+cycle columns 또는 Cycle+well columns)",
+        type=["csv", "xlsx", "xls"],
+    )
+
+    if up is not None:
+        run_id = f"upload_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{_safe_stem(up.name)}"
+        raw_bytes = up.getvalue() if hasattr(up, "getvalue") else up.read()
+
+        UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        ext = ".xlsx" if up.name.lower().endswith((".xlsx", ".xls")) else ".csv"
+        saved_path = UPLOAD_DIR / f"{run_id}{ext}"
+        saved_path.write_bytes(raw_bytes)
+
+        # 다시 bytes로 읽기 위해 file-like 만들기
+        up_buf = io.BytesIO(raw_bytes)
+        if ext in (".xlsx", ".xls"):
+            df = pd.read_excel(up_buf)
+        else:
+            df = pd.read_csv(up_buf)
+
+        st.write("미리보기", df.head(10))
+
+        try:
+            df_long = infer_long_df(df, run_id=run_id)
+            st.success(f"변환 성공: long rows={len(df_long):,}, wells={df_long['well_uid'].nunique():,}")
+            st.dataframe(df_long.head(30), use_container_width=True)
+
+            if st.button("예측 실행", type="primary"):
+              with st.spinner("예측 중..."):
+                  pred_df = predict_ct(df_long, cutoff=cutoff)
+              st.success(f"완료! 예측 wells={len(pred_df):,}")
+              st.dataframe(pred_df, use_container_width=True)
+
+        # ---- (추가) 업로드 데이터에 정답 Ct가 있으면 즉석 평가 ----
+              true_col = None
+              for cand in ["true_ct", "ct", "Ct", "CT", "TrueCt", "trueCt"]:
+                if cand in df.columns:
+                    true_col = cand
+                    break
+
+              if true_col is not None:
+                well_key = None
+                for w in ["Well", "well", "WELL"]:
+                  if w in df.columns:
+                      well_key = w
+                      break
+
+                if well_key is not None and "Well" in pred_df.columns:
+                  truth2 = df[[well_key, true_col]].copy()
+                  truth2.columns = ["Well", "true_ct"]
+                  eval_df = pred_df.merge(truth2, on="Well", how="left")
+                else:
+                  eval_df = pred_df.copy()
+                  eval_df["true_ct"] = df[true_col].values[:len(eval_df)]
+
+                eval_df = eval_df.dropna(subset=["true_ct"]).copy()
+                eval_df["true_ct"] = pd.to_numeric(eval_df["true_ct"], errors="coerce")
+                eval_df = eval_df.dropna(subset=["true_ct"]).copy()
+        
+                eval_df["err"] = eval_df["pred_ct"] - eval_df["true_ct"]
+                mae = float(np.mean(np.abs(eval_df["err"])))
+                rmse = float(np.sqrt(np.mean(eval_df["err"] ** 2)))
+        
+                st.markdown("### ✅ 업로드 데이터 즉석 평가")
+                st.write({"MAE": mae, "RMSE": rmse, "n": len(eval_df)})
+        
+                st.markdown("**Pred vs True (산점도)**")
+                st.scatter_chart(eval_df[["true_ct", "pred_ct"]], x="true_ct", y="pred_ct", height=300)
+        
+                st.markdown("**Residual(오차) 분포**")
+                st.line_chart(eval_df["err"].value_counts().sort_index(), height=220)
+              else:
+                  st.info("업로드 파일에 정답 Ct 컬럼이 없어서(예: true_ct/ct) 즉석 평가는 생략했어요.")
+
+                csv_bytes = pred_df.to_csv(index=False).encode("utf-8-sig")
+                st.download_button(
+                    "결과 CSV 다운로드",
+                    data=csv_bytes,
+                    file_name=f"pred_{run_id}_cutoff{cutoff}.csv",
+                    mime="text/csv",
+                )
+
+        except Exception as e:
+            st.error(f"업로드 데이터 처리 실패: {e}")
+
+with colB:
+    st.subheader("2) 누적 반영 후 재학습 (관리자 버튼)")
+    st.info(
+        "이 버튼은 **현재 서버에 저장된 canonical 데이터(master_long.parquet)** 기준으로 "
+        "모델을 다시 학습하고 data/models/by_cutoff에 덮어씁니다.\n\n"
+        "⚠️ 데이터 ingest(= raw -> canonical)는 이 버튼에 포함되어 있지 않아요. "
+        "새 raw 데이터를 canonical로 반영하려면 ingest 파이프라인으로 먼저 master_long을 업데이트해줘야 해요."
+    )
+
+    meta = load_meta(cutoff)
+    if meta:
+        with st.expander("선택된 모델 메타 보기"):
+            st.json(meta)
+
+    if st.button("재학습 실행", type="secondary"):
+        with st.spinner("재학습 중... (로그 생성 중)"):
+            code, log = run_retrain(int(min_c), int(max_c))
+
+        st.text_area("학습 로그", log, height=380)
+
+        if code == 0:
+            st.success("재학습 완료! 모델 파일이 갱신됐어요.")
+            report_path = PROJECT_ROOT / "data" / "models" / "train_report.csv"
+            if report_path.exists():
+                rep = pd.read_csv(report_path)
+                st.dataframe(rep, use_container_width=True)
+        else:
+            st.error(f"재학습 실패 (return code={code}) - 로그를 확인해줘.")
+    # ---- (추가) 서버 모델 성능 리포트 표시 ----
+    st.subheader("📊 모델 성능 리포트 (서버 학습 기준)")
+
+    report_path = PROJECT_ROOT / "data" / "models" / "train_report.csv"
+    if report_path.exists():
+        rep = pd.read_csv(report_path)
+
+        cols = {c.lower(): c for c in rep.columns}
+        cutoff_col = cols.get("cutoff", "cutoff")
+        mae_col = cols.get("mae") if ("mae" in cols) else None
+        rmse_col = cols.get("rmse") if ("rmse" in cols) else None
+
+        st.dataframe(rep, use_container_width=True)
+
+        if mae_col and cutoff_col in rep.columns:
+            st.line_chart(rep.set_index(cutoff_col)[mae_col], height=220)
+        if rmse_col and cutoff_col in rep.columns:
+            st.line_chart(rep.set_index(cutoff_col)[rmse_col], height=220)
+    else:
+        st.info("train_report.csv가 아직 없어요. 재학습 실행 후 생성됩니다.")
