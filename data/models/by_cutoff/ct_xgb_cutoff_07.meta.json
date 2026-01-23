@@ -1,0 +1,20 @@
+{
+  "cutoff": 7,
+  "feat_cols": [
+    "f_cycle_1",
+    "f_cycle_2",
+    "f_cycle_3",
+    "f_cycle_4",
+    "f_cycle_5",
+    "f_cycle_6",
+    "f_cycle_7",
+    "f_slope10",
+    "f_area",
+    "f_max",
+    "f_argmax"
+  ],
+  "mae_test": 4.947181224822998,
+  "rmse_test": 6.78375244140625,
+  "n_curves": 274,
+  "n_runs": 16
+}

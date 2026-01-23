@@ -1,0 +1,33 @@
+{
+  "cutoff": 20,
+  "feat_cols": [
+    "f_cycle_1",
+    "f_cycle_2",
+    "f_cycle_3",
+    "f_cycle_4",
+    "f_cycle_5",
+    "f_cycle_6",
+    "f_cycle_7",
+    "f_cycle_8",
+    "f_cycle_9",
+    "f_cycle_10",
+    "f_cycle_11",
+    "f_cycle_12",
+    "f_cycle_13",
+    "f_cycle_14",
+    "f_cycle_15",
+    "f_cycle_16",
+    "f_cycle_17",
+    "f_cycle_18",
+    "f_cycle_19",
+    "f_cycle_20",
+    "f_slope10",
+    "f_area",
+    "f_max",
+    "f_argmax"
+  ],
+  "mae_test": 2.987583875656128,
+  "rmse_test": 4.8630757331848145,
+  "n_curves": 274,
+  "n_runs": 16
+}

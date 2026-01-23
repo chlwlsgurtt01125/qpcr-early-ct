@@ -2,6 +2,12 @@
 __pycache__/
 *.pyc
 data/
+# ✅ allow only model artifacts for Streamlit Cloud
+!data/models/
+!data/models/by_cutoff/
+!data/models/by_cutoff/*.json
+!data/models/by_cutoff/*.meta.json
+
 app/data/
 app/data/reports/
 *.parquet
