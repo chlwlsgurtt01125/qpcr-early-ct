@@ -1050,17 +1050,52 @@ def load_curve_from_master(run_id: str, well_id: str) -> pd.DataFrame:
     cycle_col = "Cycle" if "Cycle" in cols else ("cycle" if "cycle" in cols else None)
     fluor_col = "Fluor" if "Fluor" in cols else ("fluor" if "fluor" in cols else None)
     run_col   = "run_id" if "run_id" in cols else None
-    well_col  = "well_id" if "well_id" in cols else ("well_uid" if "well_uid" in cols else None)
-
+    
+    # ✅ 여기가 핵심: Well이 있으면 Well을 최우선으로
+    if "Well" in cols:
+        well_col = "Well"
+    elif "well_id" in cols:
+        well_col = "well_id"
+    elif "well_uid" in cols:
+        well_col = "well_uid"
+    else:
+        well_col = None
+    
     if not all([cycle_col, fluor_col, run_col, well_col]):
         raise ValueError(f"master_long columns unexpected. found={sorted(cols)[:50]} ...")
-
-    filt = (ds.field(run_col) == run_id) & (ds.field(well_col) == well_id)
+    
+    # ✅ well_uid를 쓰는 경우에는 run_id:Well 형태로 맞춰줌
+    well_value = well_id
+    if well_col == "well_uid":
+        well_value = f"{run_id}:{well_id}"
+    
+    filt = (ds.field(run_col) == run_id) & (ds.field(well_col) == well_value)
     table = dataset.to_table(filter=filt, columns=[run_col, well_col, cycle_col, fluor_col])
     df = table.to_pandas()
-
-    df = df.rename(columns={cycle_col: "Cycle", fluor_col: "Fluor", well_col: "well_id"})
+    
+    df = df.rename(columns={cycle_col: "Cycle", fluor_col: "Fluor"})
     df = df.sort_values("Cycle").reset_index(drop=True)
+    return df
+
+
+def load_one_curve_from_predictions_row(row) -> pd.DataFrame:
+    """
+    predictions_long.parquet row에 curve_cycles_json / curve_fluor_json 이 있으면
+    그걸로 원본 곡선을 복원한다 (Streamlit Cloud fallback).
+    Returns: DataFrame with columns ["Cycle","Fluor"] sorted by Cycle
+    """
+    import json
+    cycles_json = row.get("curve_cycles_json", "") if isinstance(row, dict) else getattr(row, "curve_cycles_json", "")
+    fluor_json  = row.get("curve_fluor_json", "")  if isinstance(row, dict) else getattr(row, "curve_fluor_json", "")
+
+    if not cycles_json or not fluor_json:
+        raise ValueError("curve_cycles_json / curve_fluor_json is empty (retrain on server with curve embedding).")
+
+    cycles = json.loads(cycles_json)
+    fluor  = json.loads(fluor_json)
+
+    df = pd.DataFrame({"Cycle": cycles, "Fluor": fluor})
+    df = df.dropna().sort_values("Cycle").reset_index(drop=True)
     return df
 
 def show_hard_review() -> None:
@@ -1266,49 +1301,82 @@ def show_hard_review() -> None:
     )
     
     # ---- 플롯 ----
-    st.markdown("### 📈 원본 qPCR 곡선 보기 (master_long 기준)")
-    try:
-        curve = load_curve_from_master(rid, wid)
-        if curve.empty:
-            st.info("master_long에서 해당 (run_id, well_id) 곡선을 찾지 못했어.")
+    st.markdown("### 📈 원본 qPCR 곡선 보기 (master_long 우선, 없으면 predictions_long JSON fallback)")
+
+    cutoff_i = int(cutoff)
+    curve = None
+
+    # (1) 서버/로컬에 master_long 있으면 그걸 우선 시도
+    if has_canonical_master_long():
+        try:
+            curve = load_curve_from_master(rid, wid)
+        except Exception as e:
+            curve = None
+            st.info(f"master_long에서 로드 실패 → fallback 시도: {e}")
+
+    # (2) Cloud(=master_long 없음) 또는 (1) 실패면 predictions_long의 JSON으로 복원
+    if curve is None or len(curve) == 0:
+        try:
+            curve = load_one_curve_from_predictions_row(sel.to_dict())
+        except Exception as e:
+            st.warning(f"곡선 로딩/플롯 실패 (fallback 포함): {e}")
+            curve = None
+
+    if curve is None or len(curve) == 0:
+        st.info("곡선 데이터를 찾지 못했어. (master_long도 없고, predictions_long JSON도 비어있음)")
+    else:
+        curve = curve.sort_values("Cycle").reset_index(drop=True)
+        curve["segment"] = np.where(curve["Cycle"] <= cutoff_i, "early(<=cutoff)", "late")
+
+        import altair as alt
+
+        line = (
+            alt.Chart(curve)
+            .mark_line()
+            .encode(
+                x=alt.X("Cycle:Q", title="Cycle"),
+                y=alt.Y("Fluor:Q", title="Fluor"),
+                tooltip=["Cycle", "Fluor", "segment"],
+            )
+        )
+        vline = (
+            alt.Chart(pd.DataFrame({"Cycle": [cutoff_i]}))
+            .mark_rule(strokeDash=[6, 4])
+            .encode(x="Cycle:Q")
+        )
+        st.altair_chart(line + vline, use_container_width=True)
+
+        st.markdown("#### 🔍 Early 구간 확대 (<= cutoff)")
+        early = curve[curve["Cycle"] <= cutoff_i].copy()
+        if len(early) < 2:
+            st.info("early 구간 데이터가 너무 적어서 확대 플롯을 못 그려.")
         else:
-            cutoff_i = int(cutoff)
-            curve = curve.sort_values("Cycle").reset_index(drop=True)
-            curve["segment"] = np.where(curve["Cycle"] <= cutoff_i, "early(<=cutoff)", "late")
-    
-            import altair as alt
-    
-            line = (
-                alt.Chart(curve)
+            eline = (
+                alt.Chart(early)
                 .mark_line()
                 .encode(
-                    x=alt.X("Cycle:Q", title="Cycle"),
+                    x=alt.X("Cycle:Q", title="Cycle (early)"),
                     y=alt.Y("Fluor:Q", title="Fluor"),
-                    tooltip=["Cycle", "Fluor", "segment"],
+                    tooltip=["Cycle", "Fluor"],
                 )
             )
-            vline = (
-                alt.Chart(pd.DataFrame({"Cycle": [cutoff_i]}))
-                .mark_rule(strokeDash=[6, 4])
-                .encode(x="Cycle:Q")
+            st.altair_chart(eline, use_container_width=True)
+
+    st.markdown("#### 🔍 Early 구간 확대 (<= cutoff)")
+    early = curve[curve["Cycle"] <= cutoff_i].copy()
+    if len(early) < 2:
+        st.info("early 구간 데이터가 너무 적어서 확대 플롯을 못 그려.")
+    else:
+        eline = (
+            alt.Chart(early)
+            .mark_line()
+            .encode(
+                x=alt.X("Cycle:Q", title="Cycle (early)"),
+                y=alt.Y("Fluor:Q", title="Fluor"),
+                tooltip=["Cycle", "Fluor"],
             )
-            st.altair_chart(line + vline, use_container_width=True)
-    
-            st.markdown("#### 🔍 Early 구간 확대 (<= cutoff)")
-            early = curve[curve["Cycle"] <= cutoff_i].copy()
-            if len(early) < 2:
-                st.info("early 구간 데이터가 너무 적어서 확대 플롯을 못 그려.")
-            else:
-                eline = (
-                    alt.Chart(early)
-                    .mark_line()
-                    .encode(
-                        x=alt.X("Cycle:Q", title="Cycle (early)"),
-                        y=alt.Y("Fluor:Q", title="Fluor"),
-                        tooltip=["Cycle", "Fluor"],
-                    )
-                )
-                st.altair_chart(eline, use_container_width=True)
+        )
+        st.altair_chart(eline, use_container_width=True)
     
     except Exception as e:
         st.warning(f"곡선 로딩/플롯 실패: {e}")
@@ -1996,3 +2064,8 @@ with tabs[3]:
             show_train_report()
         else:
             st.error(f"재학습 실패 (return code={code}) - 로그를 확인해줘.")
+            
+try:
+    st.caption("VERSION: " + (PROJECT_ROOT / "VERSION.txt").read_text().strip())
+except Exception:
+    st.caption("VERSION: (missing)")
