@@ -1302,82 +1302,59 @@ def show_hard_review() -> None:
     
     # ---- 플롯 ----
     st.markdown("### 📈 원본 qPCR 곡선 보기 (master_long 우선, 없으면 predictions_long JSON fallback)")
-
     cutoff_i = int(cutoff)
-    curve = None
 
-    # (1) 서버/로컬에 master_long 있으면 그걸 우선 시도
-    if has_canonical_master_long():
-        try:
+    try:
+        curve = None
+
+        # 1) master_long 있으면 우선 로드
+        if has_canonical_master_long():
             curve = load_curve_from_master(rid, wid)
-        except Exception as e:
-            curve = None
-            st.info(f"master_long에서 로드 실패 → fallback 시도: {e}")
 
-    # (2) Cloud(=master_long 없음) 또는 (1) 실패면 predictions_long의 JSON으로 복원
-    if curve is None or len(curve) == 0:
-        try:
+        # 2) 없거나(Cloud) / 못찾았거나 / 빈 df면 -> predictions_long의 JSON으로 복원
+        if curve is None or len(curve) == 0:
             curve = load_one_curve_from_predictions_row(sel.to_dict())
-        except Exception as e:
-            st.warning(f"곡선 로딩/플롯 실패 (fallback 포함): {e}")
-            curve = None
 
-    if curve is None or len(curve) == 0:
-        st.info("곡선 데이터를 찾지 못했어. (master_long도 없고, predictions_long JSON도 비어있음)")
-    else:
-        curve = curve.sort_values("Cycle").reset_index(drop=True)
-        curve["segment"] = np.where(curve["Cycle"] <= cutoff_i, "early(<=cutoff)", "late")
-
-        import altair as alt
-
-        line = (
-            alt.Chart(curve)
-            .mark_line()
-            .encode(
-                x=alt.X("Cycle:Q", title="Cycle"),
-                y=alt.Y("Fluor:Q", title="Fluor"),
-                tooltip=["Cycle", "Fluor", "segment"],
-            )
-        )
-        vline = (
-            alt.Chart(pd.DataFrame({"Cycle": [cutoff_i]}))
-            .mark_rule(strokeDash=[6, 4])
-            .encode(x="Cycle:Q")
-        )
-        st.altair_chart(line + vline, use_container_width=True)
-
-        st.markdown("#### 🔍 Early 구간 확대 (<= cutoff)")
-        early = curve[curve["Cycle"] <= cutoff_i].copy()
-        if len(early) < 2:
-            st.info("early 구간 데이터가 너무 적어서 확대 플롯을 못 그려.")
+        if curve is None or len(curve) == 0:
+            st.info("곡선 데이터를 찾지 못했어. (master_long도 없고, predictions_long JSON도 비어있음)")
         else:
-            eline = (
-                alt.Chart(early)
+            curve = curve.sort_values("Cycle").reset_index(drop=True)
+            curve["segment"] = np.where(curve["Cycle"] <= cutoff_i, "early(<=cutoff)", "late")
+
+            import altair as alt
+
+            line = (
+                alt.Chart(curve)
                 .mark_line()
                 .encode(
-                    x=alt.X("Cycle:Q", title="Cycle (early)"),
+                    x=alt.X("Cycle:Q", title="Cycle"),
                     y=alt.Y("Fluor:Q", title="Fluor"),
-                    tooltip=["Cycle", "Fluor"],
+                    tooltip=["Cycle", "Fluor", "segment"],
                 )
             )
-            st.altair_chart(eline, use_container_width=True)
-
-    st.markdown("#### 🔍 Early 구간 확대 (<= cutoff)")
-    early = curve[curve["Cycle"] <= cutoff_i].copy()
-    if len(early) < 2:
-        st.info("early 구간 데이터가 너무 적어서 확대 플롯을 못 그려.")
-    else:
-        eline = (
-            alt.Chart(early)
-            .mark_line()
-            .encode(
-                x=alt.X("Cycle:Q", title="Cycle (early)"),
-                y=alt.Y("Fluor:Q", title="Fluor"),
-                tooltip=["Cycle", "Fluor"],
+            vline = (
+                alt.Chart(pd.DataFrame({"Cycle": [cutoff_i]}))
+                .mark_rule(strokeDash=[6, 4])
+                .encode(x="Cycle:Q")
             )
-        )
-        st.altair_chart(eline, use_container_width=True)
-    
+            st.altair_chart(line + vline, use_container_width=True)
+
+            st.markdown("#### 🔍 Early 구간 확대 (<= cutoff)")
+            early = curve[curve["Cycle"] <= cutoff_i].copy()
+            if len(early) < 2:
+                st.info("early 구간 데이터가 너무 적어서 확대 플롯을 못 그려.")
+            else:
+                eline = (
+                    alt.Chart(early)
+                    .mark_line()
+                    .encode(
+                        x=alt.X("Cycle:Q", title="Cycle (early)"),
+                        y=alt.Y("Fluor:Q", title="Fluor"),
+                        tooltip=["Cycle", "Fluor"],
+                    )
+                )
+                st.altair_chart(eline, use_container_width=True)
+
     except Exception as e:
         st.warning(f"곡선 로딩/플롯 실패: {e}")
     
