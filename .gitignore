@@ -13,3 +13,17 @@ app/data/reports/
 *.parquet
 *.csv
 *.xlsx
+
+# --- allow streamlit cloud artifacts ---
+!reports/
+!reports/active_model.txt
+!reports/train_report.csv
+!reports/**/metrics_by_cutoff.parquet
+!reports/**/predictions_long.parquet
+
+# --- allow only model artifacts under data/ ---
+!data/
+!data/models/
+!data/models/by_cutoff/
+!data/models/by_cutoff/*.json
+!data/models/by_cutoff/*.meta.json
