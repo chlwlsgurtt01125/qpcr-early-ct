@@ -1,13 +1,14 @@
-from __future__ import annotations
-import argparse
+#step3_train_and_save_models.pyimport argparse
 import numpy as np
 import pandas as pd
 import xgboost as xgb
 from sklearn.model_selection import GroupShuffleSplit
 from pathlib import Path
-
+import sys
 from core.model_features import build_xy_from_master_long
 from core.model_store import save_model
+import argparse
+import json
 
 DATA = Path("data/canonical/master_long.parquet")
 
@@ -95,53 +96,197 @@ def train_one_cutoff(df_long: pd.DataFrame, cutoff: int, seed: int = 42) -> tupl
     pred_df["true_ct"] = yte.astype(float)
     pred_df["pred_ct"] = pred.astype(float)
 
-    return metrics, pred_df[["run_id", "well_id", "cutoff", "true_ct", "pred_ct"]]
+    # --- embed original curve into prediction log (for Streamlit Cloud) ---
+    # master_long(df_long)에서 테스트 샘플(run_id, well) 곡선을 찾아
+    # Cycle/Fluor 리스트를 JSON 문자열로 predictions_long에 박아둔다.
+    try:
+        import json as _json
 
+        src = df_long
+        cols = set(src.columns)
+
+        # (A) df_long 쪽 key 만들기
+        if "well_uid" in cols:
+            tmp = src[["well_uid", "Cycle", "Fluor"]].copy()
+            tmp["well_key"] = tmp["well_uid"].astype(str)
+        elif ("run_id" in cols) and ("Well" in cols):
+            tmp = src[["run_id", "Well", "Cycle", "Fluor"]].copy()
+            tmp["well_key"] = tmp["run_id"].astype(str) + ":" + tmp["Well"].astype(str)
+        else:
+            raise ValueError(f"master_long missing key columns. has={sorted(cols)[:30]}")
+
+        # (B) pred_df 쪽 key 만들기 (meta_te에 well_uid가 있으면 그게 제일 안전)
+        if "well_uid" in meta_te.columns:
+            pred_df["well_key"] = meta_te["well_uid"].astype(str).values
+        else:
+            # pred_df의 well_id가 'run:well' 형태면 그대로 쓰고,
+            # 아니면 run_id:well 형태로 만들어준다.
+            w = pred_df["well_id"].astype(str)
+            if (w.str.contains(":").mean() > 0.5):
+                pred_df["well_key"] = w
+            else:
+                pred_df["well_key"] = pred_df["run_id"].astype(str) + ":" + w
+
+        keys = pred_df["well_key"].dropna().unique().tolist()
+        sub = tmp[tmp["well_key"].isin(keys)].copy()
+        sub = sub.sort_values(["well_key", "Cycle"])
+
+        grp = sub.groupby("well_key", sort=False)
+        cycles_map = grp["Cycle"].apply(lambda s: [int(x) for x in s.tolist()]).to_dict()
+        fluor_map  = grp["Fluor"].apply(lambda s: [float(x) for x in s.tolist()]).to_dict()
+
+        pred_df["curve_cycles_json"] = pred_df["well_key"].map(lambda k: _json.dumps(cycles_map.get(k, [])))
+        pred_df["curve_fluor_json"]  = pred_df["well_key"].map(lambda k: _json.dumps(fluor_map.get(k, [])))
+
+    except Exception as _e:
+        # 임베딩 실패해도 파일 포맷은 유지되게
+        pred_df["curve_cycles_json"] = "[]"
+        pred_df["curve_fluor_json"]  = "[]"
+        pred_df["curve_embed_error"] = str(_e)
+
+
+    # ------------------- ADD: embed raw curve into pred_df -------------------
+    # df_long columns: Cycle, Fluor, Well, run_id, channel, ...
+
+    # channel 컬럼이 meta_te에 있을 수도/없을 수도 있어서 안전 처리
+    if "channel" in meta_te.columns:
+        pred_df["channel"] = meta_te["channel"].astype(str).values
+        use_channel = True
+    else:
+        pred_df["channel"] = ""
+        use_channel = False
+
+    # pred_df의 well_id는 df_long의 Well과 매칭됨
+    keys = ["run_id", "well_id"]
+    if use_channel:
+        keys.append("channel")
+
+    uniq = pred_df[keys].drop_duplicates().copy()
+    uniq["run_id"] = uniq["run_id"].astype(str)
+    uniq["well_id"] = uniq["well_id"].astype(str)
+    if use_channel:
+        uniq["channel"] = uniq["channel"].astype(str)
+
+    dl = df_long.copy()
+    dl["run_id"] = dl["run_id"].astype(str)
+    dl["Well"] = dl["Well"].astype(str)
+    if use_channel and "channel" in dl.columns:
+        dl["channel"] = dl["channel"].astype(str)
+
+    # df_long에서 test 샘플들만 골라오기 (merge)
+    if use_channel and "channel" in dl.columns:
+        sub = dl.merge(
+            uniq.rename(columns={"well_id": "Well"}),
+            on=["run_id", "Well", "channel"],
+            how="inner"
+        )
+        gb_cols = ["run_id", "Well", "channel"]
+    else:
+        sub = dl.merge(
+            uniq.rename(columns={"well_id": "Well"}),
+            on=["run_id", "Well"],
+            how="inner"
+        )
+        gb_cols = ["run_id", "Well"]
+
+    sub = sub.sort_values("Cycle")
+
+    # 그룹별로 Cycle/Fluor 리스트 만들기
+    agg = sub.groupby(gb_cols).agg(
+        curve_cycles=("Cycle", lambda s: s.astype(int).tolist()),
+        curve_fluor=("Fluor", lambda s: s.astype(float).tolist()),
+    ).reset_index()
+
+    # 다시 pred_df에 붙이기 (left join)
+    if use_channel and "channel" in dl.columns:
+        pred_df = pred_df.merge(
+            agg.rename(columns={"Well": "well_id"}),
+            on=["run_id", "well_id", "channel"],
+            how="left"
+        )
+    else:
+        pred_df = pred_df.merge(
+            agg.rename(columns={"Well": "well_id"}),
+            on=["run_id", "well_id"],
+            how="left"
+        )
+
+    # json 문자열로 저장 (parquet 호환/Cloud 안전)
+    pred_df["curve_cycles_json"] = pred_df["curve_cycles"].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, list) else "")
+    pred_df["curve_fluor_json"] = pred_df["curve_fluor"].apply(lambda x: json.dumps(x, ensure_ascii=False) if isinstance(x, list) else "")
+
+    # 중간 list 컬럼은 최종 저장에서 제거해도 됨 (용량 줄이기)
+    pred_df = pred_df.drop(columns=["curve_cycles", "curve_fluor"], errors="ignore")
+    # ------------------------------------------------------------------------
+
+     return metrics, pred_df[[
+        "run_id", "well_id", "cutoff", "true_ct", "pred_ct",
+        "curve_cycles_json", "curve_fluor_json"
+    ]]
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--min_cutoff", type=int, default=1)
     ap.add_argument("--max_cutoff", type=int, default=40)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--data_path", type=str, default="data/canonical/master_long.parquet")
+    ap.add_argument("--device", type=str, default="auto")  # auto/cpu/cuda
     args = ap.parse_args()
 
-    df_long = pd.read_parquet(DATA)
+    data_path = Path(args.data_path)
+    if not data_path.exists():
+        print(f"[ERROR] missing training data: {data_path.resolve()}")
+        print("Hint: 이 파일은 Streamlit Cloud에는 없고, 서버/로컬(데이터 있는 곳)에서만 학습 가능합니다.")
+        sys.exit(2)
+
+    # --- device 설정 ---
+    device = args.device.lower()
+    use_cuda = False
+    if device == "cuda":
+        use_cuda = True
+    elif device == "cpu":
+        use_cuda = False
+    else:
+        # auto: 가능하면 cuda
+        try:
+            import torch
+            use_cuda = bool(torch.cuda.is_available())
+        except Exception:
+            use_cuda = False
+
+    df_long = pd.read_parquet(data_path)
+
     metrics_rows = []
     pred_rows = []
+
     for c in range(args.min_cutoff, args.max_cutoff + 1):
         try:
             r, pred_df = train_one_cutoff(df_long, cutoff=c, seed=args.seed)
             print(f"[OK] cutoff={c:2d}  n_curves={r['n_curves']}  MAE={r['mae_test']:.3f}  RMSE={r['rmse_test']:.3f}")
             metrics_rows.append(r)
             pred_rows.append(pred_df)
-
         except Exception as e:
             print(f"[SKIP] cutoff={c:2d}  reason={e}")
 
-    out = Path("data/models/train_report.csv")
+    # --- reports 저장 ---
+    out = Path("reports/train_report.csv")
     out.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(metrics_rows).to_csv(out, index=False)
-    print(f"[SAVED] {out}")
-    
-    # --- save parquet reports for Streamlit pages ---
-    model_id = "model_server_latest_xgb"
-    app_reports = Path(__file__).resolve().parents[1] / "app" / "data" / "reports" / model_id
-    app_reports.mkdir(parents=True, exist_ok=True)
-
     rep = pd.DataFrame(metrics_rows).sort_values("cutoff").reset_index(drop=True)
-    rep.to_parquet(app_reports / "metrics_by_cutoff.parquet", index=False)
+    rep.to_csv(out, index=False)
+    print(f"[SAVED] {out}")
+
+    model_id = "model_server_latest_xgb"
+    rep_dir = Path("reports") / model_id
+    rep_dir.mkdir(parents=True, exist_ok=True)
+    rep.to_parquet(rep_dir / "metrics_by_cutoff.parquet", index=False)
 
     if pred_rows:
         pred_long = pd.concat(pred_rows, ignore_index=True)
-        pred_long.to_parquet(app_reports / "predictions_long.parquet", index=False)
+        pred_long.to_parquet(rep_dir / "predictions_long.parquet", index=False)
 
-    # active model 지정(선택이지만 강력 추천)
-    app_models = Path(__file__).resolve().parents[1] / "app" / "models"
-    app_models.mkdir(parents=True, exist_ok=True)
-    (app_models / "active_model.txt").write_text(model_id)
-
-    print(f"[WROTE] {app_reports/'metrics_by_cutoff.parquet'}")
-    print(f"[WROTE] {app_reports/'predictions_long.parquet'}")
+    (Path("reports") / "active_model.txt").write_text(model_id, encoding="utf-8")
+    print(f"[WROTE] reports/{model_id}/metrics_by_cutoff.parquet")
+    print(f"[WROTE] reports/{model_id}/predictions_long.parquet")
 
 if __name__ == "__main__":
     main()
