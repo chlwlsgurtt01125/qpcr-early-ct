@@ -15,6 +15,7 @@ import pandas as pd
 import streamlit as st
 import xgboost as xgb
 import pyarrow.dataset as ds
+import argparse
 
 # --- make sure PROJECT_ROOT is importable so "core" works even when launched from other dirs ---
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -31,6 +32,49 @@ st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
 # -------------------------
 # Utilities
 # -------------------------
+# -------------------------
+# Utilities
+# -------------------------
+
+def get_reports_root() -> Path:
+    # 1) 가장 우선: 레포 루트의 reports/ (Streamlit Cloud 배포용)
+    p = Path("reports")
+    if p.exists():
+        return p
+
+    # 2) (레거시/로컬) app/data/reports 같은 위치를 쓰던 경우 대비
+    p2 = Path(__file__).resolve().parent / "data" / "reports"
+    if p2.exists():
+        return p2
+
+    # 3) 마지막 fallback
+    return Path("reports")
+
+REPORTS_ROOT = get_reports_root()
+
+def has_canonical_master_long() -> bool:
+    return (PROJECT_ROOT / "data" / "canonical" / "master_long.parquet").exists()
+
+def running_on_streamlit_cloud() -> bool:
+    # streamlit cloud는 보통 /mount/src 아래에서 실행됨
+    return str(PROJECT_ROOT).startswith("/mount/src")
+
+can_retrain = has_canonical_master_long() and (not running_on_streamlit_cloud())
+if running_on_streamlit_cloud():
+    st.warning(
+        "Streamlit Cloud에는 학습 데이터(data/canonical/master_long.parquet)가 없어서 재학습을 실행할 수 없어요.\n"
+        "서버/로컬에서 학습을 돌려 reports/ 결과물을 저장(또는 커밋)한 뒤 Cloud에서는 그 결과를 보여주는 방식으로 운영하세요."
+    )
+elif not has_canonical_master_long():
+    st.warning("학습 데이터 master_long.parquet가 없어서 재학습을 실행할 수 없어요.")
+
+
+def get_active_model_id() -> str:
+    p = REPORTS_ROOT / "active_model.txt"
+    mid = p.read_text().strip() if p.exists() else "model_server_latest_xgb"
+    mid = Path(mid).name
+    return mid
+
 
 def _line_y_eq_x(df: pd.DataFrame):
     # y=x 라인 그리기 위한 DataFrame
@@ -375,7 +419,7 @@ def plot_cv_vs_ct(df_long: pd.DataFrame, pred_df: pd.DataFrame, cutoff: int) -> 
 
 def get_best_cutoff_from_report() -> int | None:
     """train_report.csv에서 mae_test(또는 mae) 최소 cutoff를 반환"""
-    report_path = PROJECT_ROOT / "data" / "models" / "train_report.csv"
+    report_path = REPORTS_ROOT / "train_report.csv"
     if not report_path.exists():
         return None
 
@@ -546,6 +590,8 @@ def predict_ct(df_long: pd.DataFrame, cutoff: int) -> pd.DataFrame:
 
 
 def run_retrain(min_cutoff: int, max_cutoff: int) -> tuple[int, str]:
+    if running_on_streamlit_cloud():
+        return 2, "Streamlit Cloud에서는 canonical 데이터가 없어서 재학습이 비활성화되어 있습니다. 서버/로컬에서 학습 후 reports/만 배포하세요."
     """
     현재 서버에 있는 canonical/master_long.parquet 기준으로 모델 전체 재학습.
     (Streamlit 버튼에서도 GPU 사용 가능하도록 env 전달)
@@ -654,50 +700,45 @@ def read_uploaded_table(up):
 def sync_train_report_to_parquet(rep: pd.DataFrame) -> str:
     """
     train_report.csv(rep)를 Performance 페이지가 읽는 parquet로 저장한다.
-    저장 위치는 항상: <repo>/app/data/reports/<model_id>/metrics_by_cutoff.parquet
-    그리고 <repo>/app/models/active_model.txt 를 업데이트한다.
+
+    저장 위치:
+      <repo>/reports/<model_id>/metrics_by_cutoff.parquet
+    그리고:
+      <repo>/reports/active_model.txt 를 업데이트한다.
     """
     model_id = "model_server_latest_xgb"
 
-    APP_ROOT = Path(__file__).resolve().parent            # .../qpcr_v2/app
-    outdir = APP_ROOT / "data" / "reports" / model_id
+    outdir = REPORTS_ROOT / model_id
     outdir.mkdir(parents=True, exist_ok=True)
-
-    # train_report.csv 컬럼: cutoff, mae, rmse (너 코드에서 이렇게 쓰고 있음)
+    (REPORTS_ROOT / "active_model.txt").write_text(model_id, encoding="utf-8")
     cols = {str(c).lower(): c for c in rep.columns}
     cutoff_col = cols.get("cutoff")
     mae_col = cols.get("mae") or cols.get("mae_test")
     rmse_col = cols.get("rmse") or cols.get("rmse_test")
 
     if not (cutoff_col and mae_col and rmse_col):
-      # 디버깅용으로 뭐가 없었는지 찍어두면 좋음
-      print("Missing cols:", {"cutoff": cutoff_col, "mae": mae_col, "rmse": rmse_col})
-      print("Available:", list(rep.columns))
-      return model_id
-
+        print("Missing cols:", {"cutoff": cutoff_col, "mae": mae_col, "rmse": rmse_col})
+        print("Available:", list(rep.columns))
+        return model_id
 
     rep2 = rep[[cutoff_col, mae_col, rmse_col]].copy()
-    rep2 = rep2.rename(columns={
-        cutoff_col: "cutoff",
-        mae_col: "mae_test",
-        rmse_col: "rmse_test",
-    })
+    rep2 = rep2.rename(columns={cutoff_col: "cutoff", mae_col: "mae_test", rmse_col: "rmse_test"})
 
+    # optional extras
     for extra in ["n_curves", "n_runs"]:
-        if extra in rep.columns:
-            rep2[extra] = rep[extra].values
+        if extra in cols:
+            rep2[extra] = rep[cols[extra]].values
 
     rep2.to_parquet(outdir / "metrics_by_cutoff.parquet", index=False)
 
-    (APP_ROOT / "models").mkdir(exist_ok=True)
-    (APP_ROOT / "models" / "active_model.txt").write_text(model_id)
+    (PROJECT_ROOT / "reports").mkdir(exist_ok=True)
+    (PROJECT_ROOT / "reports" / "active_model.txt").write_text(model_id, encoding="utf-8")
 
     return model_id
 
-
 def show_train_report() -> None:
     st.subheader("📊 모델 성능 리포트 (서버 학습 기준)")
-    report_path = PROJECT_ROOT / "data" / "models" / "train_report.csv"
+    report_path = REPORTS_ROOT / "train_report.csv"
     if not report_path.exists():
         st.info("train_report.csv가 아직 없어요. 재학습 실행 후 생성됩니다.")
         return
@@ -713,7 +754,7 @@ def show_train_report() -> None:
 
     # Performance 페이지용 parquet 저장
     mid = sync_train_report_to_parquet(rep)
-    st.caption(f"✅ Performance용 리포트 저장: data/reports/{mid}/metrics_by_cutoff.parquet")
+    st.caption(f"✅ Performance용 리포트 저장: reports/{mid}/metrics_by_cutoff.parquet")
 
     # ✅ 추천 cutoff 카드 (cols 만든 뒤에!)
     if cutoff_col and mae_col and rmse_col:
@@ -840,7 +881,7 @@ def show_train_report() -> None:
 
     st.divider()
 
-        # ---- (2) n_curves vs Cutoff (있을 때만) ----
+    # ---- (2) n_curves vs Cutoff (있을 때만) ----
     if "n_curves" in rep2.columns and rep2["n_curves"].notna().any():
         st.markdown("#### 📦 데이터 커버리지 (#Curves vs Cutoff)")
         cov = alt.Chart(rep2).mark_line().encode(
@@ -851,12 +892,12 @@ def show_train_report() -> None:
         st.altair_chart(cov, use_container_width=True)
 
     # =========================
-    # (추가) predictions_long 기반 동적 성능 figure  ✅ 여기 붙여넣기
+    # (추가) predictions_long 기반 동적 성능 figure
     # =========================
-    APP_ROOT = Path(__file__).resolve().parent
-    active_path = APP_ROOT / "models" / "active_model.txt"
-    model_id = active_path.read_text().strip() if active_path.exists() else "model_server_latest_xgb"
-    pred_path = APP_ROOT / "data" / "reports" / model_id / "predictions_long.parquet"
+    model_id = get_active_model_id()
+    
+    pred_path = PROJECT_ROOT / "reports" / model_id / "predictions_long.parquet"
+
 
     if pred_path.exists():
         pred_long = pd.read_parquet(pred_path)
@@ -1026,11 +1067,10 @@ def show_hard_review() -> None:
     st.subheader("🧨 Hard Sample Review (서버 평가 로그 기반)")
 
     # active model id
-    app_root = Path(__file__).resolve().parent
-    active_path = app_root / "models" / "active_model.txt"
-    model_id = active_path.read_text().strip() if active_path.exists() else "model_server_latest_xgb"
+    model_id = get_active_model_id()
 
-    pred_path = app_root / "data" / "reports" / model_id / "predictions_long.parquet"
+    pred_path = PROJECT_ROOT / "reports" / model_id / "predictions_long.parquet"
+
     if not pred_path.exists():
         st.info(f"predictions_long.parquet가 없어요: {pred_path}\n재학습을 한 번 실행해서 생성해줘.")
         return
@@ -1495,15 +1535,15 @@ with tabs[1]:
         )
         
         # --- 서버 로그 기반 '예상 정답률(확률)' 계산 (있으면) ---
-        APP_ROOT = Path(__file__).resolve().parent
-        active_path = APP_ROOT / "models" / "active_model.txt"
+        active_path = PROJECT_ROOT / "reports" / "active_model.txt"
         model_id = active_path.read_text().strip() if active_path.exists() else "model_server_latest_xgb"
-        server_pred_path = APP_ROOT / "data" / "reports" / model_id / "predictions_long.parquet"
         
+        pred_path = PROJECT_ROOT / "reports" / model_id / "predictions_long.parquet"
+
         expected_rate = None
-        if server_pred_path.exists():
+        if pred_path.exists():
             try:
-                server_pred_long = pd.read_parquet(server_pred_path)
+                server_pred_long = pd.read_parquet(pred_path)
                 acc_df_srv = perf_accuracy_fraction_vs_cutoff(server_pred_long, tol=float(tol_u))
                 hit = acc_df_srv[acc_df_srv["cutoff"] == int(cutoff)]
                 if not hit.empty:
@@ -1917,6 +1957,14 @@ with tabs[2]:
 # -------------------------
 with tabs[3]:
     st.subheader("2) 누적 반영 후 재학습 (관리자 버튼)")
+
+    if running_on_streamlit_cloud():
+        st.warning(
+            "Streamlit Cloud에는 canonical 데이터(master_long.parquet)가 없어서 재학습을 실행할 수 없어요.\n"
+            "서버/로컬에서 학습 후 reports/ 결과물만 배포하세요."
+        )
+        st.stop()  # ✅ 여기서 탭 실행을 끝내버리면 step3가 절대 호출되지 않음
+
     st.info(
         "이 버튼은 **현재 서버에 저장된 canonical 데이터(master_long.parquet)** 기준으로 "
         "모델을 다시 학습하고 data/models/by_cutoff에 덮어씁니다.\n\n"
@@ -1929,12 +1977,20 @@ with tabs[3]:
         with st.expander("선택된 모델 메타 보기"):
             st.json(meta)
 
-    if st.button("재학습 실행", type="secondary", key="btn_retrain"):
+    can_retrain = has_canonical_master_long() and (not running_on_streamlit_cloud())
+
+    if not can_retrain:
+        st.warning(
+            "Streamlit Cloud에는 학습 데이터(master_long.parquet)가 없어서 재학습을 실행할 수 없어요.\n"
+            "로컬/서버에서 학습을 돌린 뒤, reports/ 결과물만 repo에 커밋해서 배포하는 방식으로 운영하세요."
+        )
+    
+    if st.button("재학습 실행", type="secondary", key="btn_retrain", disabled=not can_retrain):
         with st.spinner("재학습 중... (로그 생성 중)"):
             code, log = run_retrain(int(min_c), int(max_c))
-
+    
         st.text_area("학습 로그", log, height=380)
-
+    
         if code == 0:
             st.success("재학습 완료! 모델 파일이 갱신됐어요.")
             show_train_report()
