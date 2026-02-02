@@ -9,6 +9,8 @@ import json
 import subprocess
 from datetime import datetime
 from pathlib import Path
+import urllib.request
+import urllib.error
 
 import numpy as np
 import pandas as pd
@@ -17,26 +19,180 @@ import xgboost as xgb
 import pyarrow.dataset as ds
 import argparse
 
+# ✅ set_page_config는 반드시 1번만, 그리고 최상단에서
 st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
+
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-CATALOG_PATH = Path("assets/data_catalog.json")
 
-st.subheader("Data Catalog")
+# ✅ 경로는 PROJECT_ROOT 기준으로
+ASSETS_DIR = PROJECT_ROOT / "assets"
+CATALOG_PATH = ASSETS_DIR / "data_catalog.json"
+QC_DIR = PROJECT_ROOT / "outputs" / "qc"  # ✅ QC_DIR 정의 추가
 
-if CATALOG_PATH.exists():
-    with CATALOG_PATH.open("r", encoding="utf-8") as f:
-        catalog = json.load(f)
-    st.json(catalog)   # 일단은 이렇게라도 보이게
-else:
-    st.warning(f"Catalog not found: {CATALOG_PATH.resolve()}")
+OUTPUTS_DIR = PROJECT_ROOT / "outputs" / "qc_performance_analysis"
+MODELS_DIR = PROJECT_ROOT / "data" / "models" / "by_cutoff"
+UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 
-def scan_data_files():
-    base = Path("data")
+# ========================================
+# GitHub Release에서 QC 데이터 자동 다운로드
+# ========================================
+def load_data_catalog_json(catalog_path):
+    if not catalog_path.exists():
+        return None
+    with open(catalog_path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+def ensure_asset_download(url: str, dst_path):
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    if dst_path.exists() and dst_path.stat().st_size > 0:
+        return False  # already exists
+
+    # GitHub release asset은 redirect가 있을 수 있어 urllib가 안전함
+    with urllib.request.urlopen(url) as r, open(dst_path, "wb") as f:
+        f.write(r.read())
+    return True
+
+def download_qc_data_from_github():
+    """
+    GitHub Release에서 QC 관련 parquet 파일들을 다운로드
+    
+    사용법:
+    1. GitHub에서 Release 생성
+    2. QC parquet 파일들을 Release에 첨부
+    3. 이 함수가 자동으로 다운로드
+    """
+    # ✅ 여기에 실제 GitHub Release URL 입력
+    GITHUB_RELEASE_URL = "https://github.com/YOUR_USERNAME/YOUR_REPO/releases/download/v1.0.0/"
+    
+    QC_DIR.mkdir(parents=True, exist_ok=True)
+    
+    # 다운로드할 파일 목록
+    files_to_download = [
+        "master_catalog.parquet",
+        "excluded_report.parquet",
+    ]
+    
+    for filename in files_to_download:
+        local_path = QC_DIR / filename
+        
+        # 이미 있으면 스킵
+        if local_path.exists():
+            continue
+        
+        url = GITHUB_RELEASE_URL + filename
+        
+        try:
+            st.info(f"Downloading {filename} from GitHub Release...")
+            urllib.request.urlretrieve(url, local_path)
+            st.success(f"✅ Downloaded: {filename}")
+        except urllib.error.HTTPError as e:
+            st.warning(f"⚠️ Failed to download {filename}: {e}")
+        except Exception as e:
+            st.warning(f"⚠️ Error downloading {filename}: {e}")
+
+
+# Streamlit Cloud에서 실행 중이면 자동 다운로드
+def running_on_streamlit_cloud() -> bool:
+    return str(PROJECT_ROOT).startswith("/mount/src") or os.environ.get("STREAMLIT_RUNTIME_ENV") == "cloud"
+
+
+if running_on_streamlit_cloud():
+    # Cloud에서는 QC 데이터를 GitHub Release에서 다운로드
+    if not (QC_DIR / "master_catalog.parquet").exists():
+        download_qc_data_from_github()
+
+
+# ✅ cutoff 먼저 정의
+cutoff = int(st.sidebar.selectbox("Cutoff", [10, 20, 24, 30, 40], index=1))
+OPS_DIR = PROJECT_ROOT / "outputs" / "qc_performance_analysis"
+parquet_path = OPS_DIR / f"ops_decisions_cutoff_{cutoff}.parquet"
+csv_path     = OPS_DIR / f"ops_decisions_cutoff_{cutoff}.csv"
+
+# ========== 수정된 코드 ==========
+# Data Catalog는 좌측 메뉴로만 표시하고, 메인에서는 숨김
+# (sidebar에서 클릭했을 때만 보이도록)
+
+# 좌측 사이드바에서 Data Catalog 클릭 여부 확인
+if 'show_data_catalog' not in st.session_state:
+    st.session_state.show_data_catalog = False
+
+# 좌측 메뉴에 Data Catalog 버튼 추가 (sidebar 섹션 안에)
+with st.sidebar:
+    st.divider()
+    if st.button("📊 Data Catalog", key="btn_data_catalog"):
+        st.session_state.show_data_catalog = True
+    
+    if st.button("🔙 Back to Main", key="btn_back_main"):
+        st.session_state.show_data_catalog = False
+
+# Data Catalog 표시 (클릭했을 때만)
+if st.session_state.show_data_catalog:
+    st.header("📊 Data Catalog")
+    
+    # 요약 데이터 로드
+    summary_path = PROJECT_ROOT / "outputs" / "catalog_summary.json"
+    
+    if summary_path.exists():
+        import json
+        with open(summary_path, 'r') as f:
+            summary = json.load(f)
+        
+        # 요약 통계 표시
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total Wells", f"{summary.get('total_wells', 0):,}")
+        col2.metric("✅ PASS", f"{summary.get('pass_count', 0):,}")
+        col3.metric("❌ FAIL", f"{summary.get('fail_count', 0):,}")
+        col4.metric("⚠️ FLAG", f"{summary.get('flag_count', 0):,}")
+        
+        # QC Status 분포
+        if "qc_status_distribution" in summary:
+            st.subheader("QC Status Distribution")
+            status_df = pd.DataFrame(
+                list(summary["qc_status_distribution"].items()), 
+                columns=["Status", "Count"]
+            )
+            st.bar_chart(status_df.set_index("Status"))
+        
+        # Ct Bin 분포
+        if "ct_bin_distribution" in summary:
+            st.subheader("Ct Bin Distribution")
+            bin_df = pd.DataFrame(
+                list(summary["ct_bin_distribution"].items()), 
+                columns=["Ct Bin", "Count"]
+            )
+            st.bar_chart(bin_df.set_index("Ct Bin"))
+        
+        st.caption("💡 This is summary data. For full details, run on local server.")
+    
+    else:
+        st.warning("Summary data not found. Run: python scripts/generate_catalog_summary.py")
+    
+    st.stop()  # Data Catalog 표시 후 메인 앱 중지
+
+ops = None
+try:
+    if parquet_path.exists():
+        ops = pd.read_parquet(parquet_path)
+        st.success(f"Loaded ops decisions (parquet): {parquet_path.name}")
+    elif csv_path.exists():
+        ops = pd.read_csv(csv_path, encoding="utf-8")
+        st.success(f"Loaded ops decisions (csv): {csv_path.name}")
+    else:
+        st.warning(f"Ops decisions not found: {parquet_path} (or {csv_path})")
+except Exception as e:
+    st.error(f"Failed to load ops decisions: {e}")
+    st.caption(f"Checked: {parquet_path} , {csv_path}")
+
+@st.cache_data(show_spinner=False)
+def scan_data_files() -> set[str]:
+    base = PROJECT_ROOT / "data"   # <- 상대경로 말고 PROJECT_ROOT 기준 추천
     if not base.exists():
         return set()
-    return {str(p).replace("\\", "/") for p in base.rglob("*") if p.is_file()}
+    return {str(p.relative_to(PROJECT_ROOT)).replace("\\", "/")
+            for p in base.rglob("*") if p.is_file()}
 
-def load_catalog():
+@st.cache_data(show_spinner=False)
+def load_catalog() -> list[dict]:
     if CATALOG_PATH.exists():
         return json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
     return []
@@ -44,8 +200,10 @@ def load_catalog():
 available = scan_data_files()
 catalog = load_catalog()
 
-if not catalog:
-    st.warning("Catalog metadata not found. Add assets/data_catalog.json")
+if not CATALOG_PATH.exists():
+    st.warning(f"Catalog not found: {CATALOG_PATH}")
+elif not catalog:
+    st.warning("Catalog metadata is empty. Check assets/data_catalog.json")
 else:
     rows = []
     for item in catalog:
@@ -58,71 +216,20 @@ else:
         })
     st.dataframe(pd.DataFrame(rows), use_container_width=True)
 
-    st.caption("✔ available_on_cloud=False이면 Streamlit Cloud에는 파일이 없어서 미리보기/재학습이 제한됩니다.")
-
-# --- make sure PROJECT_ROOT is importable so "core" works even when launched from other dirs ---
-
-OPS_PATH = PROJECT_ROOT / "outputs" / "qc_performance_analysis" / "ops_decisions_cutoff_20.parquet"
-@st.cache_data
-def load_ops(path: Path) -> pd.DataFrame:
-    return pd.read_parquet(path)
-
-if OPS_PATH.exists():
-    df_ops = load_ops(OPS_PATH)
-    st.success(f"Loaded ops decisions: {OPS_PATH}")
-else:
-    st.warning(f"Ops decisions not found: {OPS_PATH}. Run analyze_qc_performance.py first.")
-    df_ops = pd.DataFrame()
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-
-from core.model_features import build_x_from_long  # noqa: E402
-
-MODELS_DIR = PROJECT_ROOT / "data" / "models" / "by_cutoff"
-UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
-
-st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
-st.write("DEBUG __file__:", __file__)
-st.write("DEBUG cwd:", os.getcwd())
-st.write("DEBUG catalog exists:", CATALOG_PATH.exists(), str(CATALOG_PATH.resolve()))
-st.write("DEBUG assets files:", [p.name for p in Path("assets").glob("*")])
-
-# -------------------------
-# Utilities
-# -------------------------
-# -------------------------
-# Utilities
-# -------------------------
+# ✅ 중복 decision_from_qc 함수 제거 (하나만 유지)
 def decision_from_qc(qc_status: str) -> str:
+    """QC 상태를 기반으로 운영 결정"""
     qc_status = str(qc_status).upper().strip()
     if qc_status == "PASS":
         return "PREDICT"
     if qc_status == "FLAG":
         return "WARN"
     return "RERUN"
-    
-    qc_path = PROJECT_ROOT / "outputs" / "qc" / "master_catalog.parquet"
-    qc = pd.read_parquet(qc_path)[["well_uid", "qc_status", "fail_reason"]].copy()
-    
-    pred = predictions.copy()
-    pred["well_uid"] = pred["well_id"].astype(str)
-    
-    merged = pred.merge(qc, on="well_uid", how="left")
-    
-    merged["final_decision"] = merged["qc_status"].astype(str).map(decision_from_qc)
-    
-    merged["ct_output"] = np.where(
-        merged["final_decision"].isin(["PREDICT", "WARN"]),
-        merged["pred_ct"].astype(float),
-        np.nan
-    )
-    
-    merged["decision_note"] = merged["final_decision"].map({
-        "PREDICT": "use prediction",
-        "WARN": "use prediction with caution (FLAG)",
-        "RERUN": "do not use prediction; rerun recommended (FAIL)"
-    })
 
+
+# -------------------------
+# Utilities
+# -------------------------
 def get_reports_root() -> Path:
     # 1) 가장 우선: 레포 루트의 reports/ (Streamlit Cloud 배포용)
     p = Path("reports")
@@ -137,10 +244,13 @@ def get_reports_root() -> Path:
     # 3) 마지막 fallback
     return Path("reports")
 
+
 REPORTS_ROOT = get_reports_root()
+
 
 def has_canonical_master_long() -> bool:
     return (PROJECT_ROOT / "data" / "canonical" / "master_long.parquet").exists()
+
 
 def running_on_streamlit_cloud() -> bool:
     # streamlit cloud는 보통 /mount/src 아래에서 실행됨
