@@ -173,6 +173,7 @@ if running_on_streamlit_cloud():
 
 if st.session_state.show_data_catalog:
     st.header("📊 Data Quality Control & Catalog")
+    st.markdown("QC 상태(PASS/FAIL/FLAG), Ct bin, excluded 사유를 한 번에 정리/다운로드하는 페이지")
 
     # 1. master_catalog 로드
     @st.cache_data
@@ -181,13 +182,18 @@ if st.session_state.show_data_catalog:
         if path.exists():
             return pd.read_parquet(path)
         else:
-            st.error("master_catalog.parquet not found. Cloud에서는 자동 다운로드됩니다.")
+            st.error("master_catalog.parquet not found. Cloud에서는 GitHub Release에서 자동 다운로드됩니다.")
             return pd.DataFrame()
 
     df = load_master_catalog()
 
     if df.empty:
         st.stop()
+
+    # 필요한 컬럼 확인 (에러 방지)
+    required_cols = ["qc_status", "ct_bin"]
+    if "exclusion_reason" not in df.columns:
+        df["exclusion_reason"] = "N/A"
 
     # 2. Summary Statistics
     total = len(df)
@@ -198,12 +204,12 @@ if st.session_state.show_data_catalog:
     excluded = total - usable
 
     col1, col2, col3, col4, col5, col6 = st.columns(6)
-    col1.metric("Total Wells", total)
-    col2.metric("✅ PASS", pass_c, f"{pass_c/total*100:.1f}%")
-    col3.metric("❌ FAIL", fail_c, f"{fail_c/total*100:.1f}%")
-    col4.metric("⚠️ FLAG", flag_c, f"{flag_c/total*100:.1f}%")
-    col5.metric("🟢 Usable", usable, f"{usable/total*100:.1f}%")
-    col6.metric("🔴 Excluded", excluded, f"{excluded/total*100:.1f}%")
+    col1.metric("Total Wells", f"{total:,}")
+    col2.metric("✅ PASS", f"{pass_c:,}", f"{pass_c/total*100:.1f}%")
+    col3.metric("❌ FAIL", f"{fail_c:,}", f"{fail_c/total*100:.1f}%")
+    col4.metric("⚠️ FLAG", f"{flag_c:,}", f"{flag_c/total*100:.1f}%")
+    col5.metric("🟢 Usable", f"{usable:,}", f"{usable/total*100:.1f}%")
+    col6.metric("🔴 Excluded", f"{excluded:,}", f"{excluded/total*100:.1f}%")
 
     st.divider()
 
@@ -211,63 +217,84 @@ if st.session_state.show_data_catalog:
     import plotly.express as px
 
     col1, col2 = st.columns(2)
-
     with col1:
         st.subheader("QC Status Distribution")
         fig_pie = px.pie(
             df["qc_status"].value_counts().reset_index(),
             values="count", names="qc_status",
-            color_discrete_map={"PASS": "green", "FAIL": "red", "FLAG": "orange"}
+            color_discrete_map={"PASS": "#00FF00", "FAIL": "#FF0000", "FLAG": "#FFA500"}
         )
+        fig_pie.update_layout(showlegend=True)
         st.plotly_chart(fig_pie, use_container_width=True)
 
     with col2:
         st.subheader("Ct Bin Distribution")
+        ct_order = sorted(df["ct_bin"].dropna().unique())
         fig_ct = px.bar(
-            df["ct_bin"].value_counts().sort_index().reset_index(),
-            x="ct_bin", y="count"
+            df["ct_bin"].value_counts().reindex(ct_order).reset_index(),
+            x="ct_bin", y="count", title="Ct Bin Distribution"
         )
         st.plotly_chart(fig_ct, use_container_width=True)
 
-    # Stacked bar
     st.subheader("QC Status by Ct Bin")
     stacked = df.groupby(["ct_bin", "qc_status"]).size().reset_index(name="count")
-    fig_stacked = px.bar(stacked, x="ct_bin", y="count", color="qc_status",
-                         color_discrete_map={"PASS": "green", "FAIL": "red", "FLAG": "orange"})
+    stacked = stacked.sort_values("ct_bin")
+    fig_stacked = px.bar(
+        stacked, x="ct_bin", y="count", color="qc_status",
+        color_discrete_map={"PASS": "#00FF00", "FAIL": "#FF0000", "FLAG": "#FFA500"},
+        title="QC Status by Ct Bin"
+    )
     st.plotly_chart(fig_stacked, use_container_width=True)
 
-    # Exclusion Reasons
     excluded_df = df[df["qc_status"] != "PASS"]
     if not excluded_df.empty:
-        st.subheader("Top 10 Exclusion Reasons")
+        st.subheader("🔍 Exclusion Analysis - Top 10 Reasons")
         reasons = excluded_df["exclusion_reason"].value_counts().head(10).reset_index()
-        fig_ex = px.bar(reasons, x="count", y="exclusion_reason", orientation="h")
+        fig_ex = px.bar(reasons, x="count", y="exclusion_reason", orientation="h",
+                        title="Top 10 Exclusion Reasons")
+        fig_ex.update_layout(height=500)
         st.plotly_chart(fig_ex, use_container_width=True)
 
-    # 4. Filterable Table (AgGrid 설치 필요: pip install streamlit-aggrid)
-    st.subheader("📋 Master Catalog (Filterable)")
+    # 4. Filterable Table
+    st.subheader("📋 Master Catalog (Filterable & Sortable)")
     try:
         from st_aggrid import AgGrid, GridOptionsBuilder
         gb = GridOptionsBuilder.from_dataframe(df)
-        gb.configure_default_column(groupable=True, sortable=True, filterable=True)
-        grid = gb.build()
-        AgGrid(df, gridOptions=grid, height=500, fit_columns_on_grid_load=True)
-    except:
+        gb.configure_default_column(groupable=True, sortable=True, filterable=True, editable=False)
+        gb.configure_column("qc_status", rowGroup=True)
+        gb.configure_column("ct_bin", rowGroup=True)
+        grid_options = gb.build()
+        AgGrid(df, gridOptions=grid_options, height=600, fit_columns_on_grid_load=True)
+    except ImportError:
+        st.warning("AgGrid not available. Using basic table.")
         st.dataframe(df, use_container_width=True)
 
     # 5. Download Buttons
+    st.subheader("💾 Download Reports")
     col1, col2 = st.columns(2)
     with col1:
-        st.download_button("💾 Download Master Catalog (CSV)", df.to_csv(index=False), "master_catalog.csv")
+        st.download_button(
+            "Download Master Catalog (CSV)",
+            df.to_csv(index=False).encode('utf-8'),
+            "master_catalog_full.csv",
+            "text/csv"
+        )
     with col2:
-        st.download_button("💾 Download Excluded Report (CSV)", excluded_df.to_csv(index=False), "excluded_report.csv")
+        st.download_button(
+            "Download Excluded Report (CSV)",
+            excluded_df.to_csv(index=False).encode('utf-8'),
+            "excluded_report.csv",
+            "text/csv"
+        )
 
-    # 6. 어두운 테마 (선택)
+    # 6. 어두운 테마 (검은색 배경)
     st.markdown("""
     <style>
         .css-1d391kg {background-color: #0e1117;}
         .css-1y0t9cy {color: white;}
         section[data-testid="stSidebar"] {background-color: #262730;}
+        .css-1cpxl2t {color: white;}
+        h1, h2, h3, h4 {color: white !important;}
     </style>
     """, unsafe_allow_html=True)
 
