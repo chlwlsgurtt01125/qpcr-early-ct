@@ -43,6 +43,18 @@ def load_data_catalog(catalog_path):
     except Exception:
         return {}
 
+def load_data_catalog(path: Path) -> dict:
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return {}
+    except Exception as e:
+        st.error(f"Failed to read data_catalog.json: {e}")
+        return {}
+
+catalog = load_data_catalog(CATALOG_PATH)
+
 def find_file_url_in_catalog(catalog: dict, filename: str) -> str | None:
     for item in catalog.get("files", []):
         if item.get("filename") == filename:
