@@ -151,13 +151,7 @@ if running_on_streamlit_cloud():
 
 # ✅ cutoff 먼저 정의
 cutoff = int(st.sidebar.selectbox("Cutoff", [10, 20, 24, 30, 40], index=1))
-with st.sidebar:
-    st.divider()
-    if st.button("📊 Data Catalog", key="btn_data_catalog"):
-        st.session_state.show_data_catalog = True
-    
-    if st.button("🔙 Back to Main", key="btn_back_main"):
-        st.session_state.show_data_catalog = False
+
 OPS_DIR = PROJECT_ROOT / "outputs" / "qc_performance_analysis"
 OPS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -196,7 +190,26 @@ if st.session_state.show_data_catalog:
             return pd.DataFrame()
 
     df = load_master_catalog()
-
+    # 컬럼 확인 & 안전 처리
+    if "exclusion_reason" not in df.columns or df["exclusion_reason"].isna().all():
+        df["exclusion_reason"] = "No specific reason"  # N/A 대신 의미있는 값
+    
+    # qc_status, ct_bin 안전 처리
+    df["qc_status"] = df["qc_status"].fillna("UNKNOWN").astype(str)
+    df["ct_bin"] = df["ct_bin"].fillna("UNKNOWN").astype(str)
+    
+    # Exclusion Reasons 차트 수정 (N/A 제외하고 실제 이유만)
+    excluded_df = df[(df["qc_status"] != "PASS") & (df["exclusion_reason"] != "N/A") & (df["exclusion_reason"] != "No specific reason")]
+    if not excluded_df.empty:
+        reasons = excluded_df["exclusion_reason"].value_counts().head(10).reset_index()
+        reasons = reasons[reasons["exclusion_reason"] != "N/A"]  # 강제 필터
+        fig_ex = px.bar(reasons, x="count", y="exclusion_reason", orientation="h",
+                        title="Top 10 Exclusion Reasons")
+        fig_ex.update_layout(height=500)
+        st.plotly_chart(fig_ex, use_container_width=True)
+    else:
+        st.info("Excluded 샘플이 없거나 exclusion_reason이 모두 N/A입니다.")
+        
     if df.empty:
         st.stop()
 
@@ -228,14 +241,17 @@ if st.session_state.show_data_catalog:
 
     col1, col2 = st.columns(2)
     with col1:
-        st.subheader("QC Status Distribution")
+    st.subheader("QC Status Distribution")
+    status_counts = df["qc_status"].value_counts()
+    if not status_counts.empty:
         fig_pie = px.pie(
-            df["qc_status"].value_counts().reset_index(),
+            status_counts.reset_index(),
             values="count", names="qc_status",
-            color_discrete_map={"PASS": "#00FF00", "FAIL": "#FF0000", "FLAG": "#FFA500"}
+            color_discrete_map={"PASS": "#00FF00", "FAIL": "#FF0000", "FLAG": "#FFA500", "UNKNOWN": "#808080"}
         )
-        fig_pie.update_layout(showlegend=True)
         st.plotly_chart(fig_pie, use_container_width=True)
+    else:
+        st.info("QC Status 데이터 없음")
 
     with col2:
         st.subheader("Ct Bin Distribution")
@@ -1727,18 +1743,12 @@ if not cutoffs:
     st.stop()
 
 with st.sidebar:
-    st.header("설정")
-
-    best = get_best_cutoff_from_report()
-    default_cutoff = best if (best in cutoffs) else (30 if 30 in cutoffs else cutoffs[-1])
-
-    cutoff = st.selectbox(
-        "Cutoff(사용 cycle 수)",
-        cutoffs,
-        index=cutoffs.index(default_cutoff),
-        key="sidebar_cutoff",
-    )
-
+    st.header("Navigation")
+    if st.button("📊 Data Quality Control & Catalog", key="btn_data_catalog_main"):
+        st.session_state.show_data_catalog = True
+    if st.button("🔙 Back to Main", key="btn_back_main"):
+        st.session_state.show_data_catalog = False
+    
     st.divider()
     st.subheader("재학습 (서버 데이터 기준)")
     min_c = st.number_input("min_cutoff", min_value=1, max_value=200, value=10, step=1, key="sidebar_min_c")
