@@ -21,11 +21,6 @@ import argparse
 
 # ✅ set_page_config는 반드시 1번만, 그리고 최상단에서
 st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
-
-# 기존 초기화 코드가 있으면 덮어쓰기
-if 'show_data_catalog' not in st.session_state:
-    st.session_state.show_data_catalog = False
-
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
 # ✅ 경로는 PROJECT_ROOT 기준으로
@@ -172,8 +167,9 @@ if running_on_streamlit_cloud():
             st.warning(
                 f"Ops decisions file for cutoff={cutoff} not found in data_catalog.json: {ops_filename}"
             )
+if 'show_data_catalog' not in st.session_state:
+    st.session_state.show_data_catalog = False
 
-# 기존 Data Catalog 표시 부분 (if st.session_state.show_data_catalog:) 전체를 아래로 교체
 
 if st.session_state.show_data_catalog:
     st.header("📊 Data Quality Control & Catalog")
@@ -1762,21 +1758,23 @@ if not cutoffs:
     
 # discover_cutoffs(MODELS_DIR) 후, cutoff selectbox 전에 통째로
 
+# discover_cutoffs 아래, cutoff selectbox 전에 이 코드 넣기 (기존 사이드바 코드 삭제)
+
 with st.sidebar:
     st.title("CPHOTONICS | Early Ct Predictor")
     
-    # 최상단 큰 빨간 버튼 (항상 보임)
+    # 최상단에만 큰 빨간 버튼 (항상 보임)
     if st.button("📊 Data Quality Control & Catalog", type="primary", use_container_width=True):
         st.session_state.show_data_catalog = True
     
-    # 대시보드 모드일 때만 Back 버튼 보임
+    # 대시보드 들어갔을 때만 Back 버튼 보임
     if st.session_state.get("show_data_catalog", False):
         if st.button("🔙 Back to Main", use_container_width=True):
             st.session_state.show_data_catalog = False
     
     st.divider()
     
-    # 기존 cutoff 등 (이 아래에 그대로)
+    # cutoff 등 기존 설정 (여기서부터 기존 코드 그대로)
     best = get_best_cutoff_from_report()
     default_cutoff = best if (best in cutoffs) else (30 if 30 in cutoffs else cutoffs[-1] if cutoffs else 20)
     cutoff = int(st.selectbox(
@@ -1785,6 +1783,7 @@ with st.sidebar:
         index=cutoffs.index(default_cutoff) if default_cutoff in cutoffs else 0,
         key="sidebar_cutoff",
     ))
+    # min_c, max_c 등 나머지 그대로
     # ... min_c, max_c 등 나머지
     # ... 나머지 기존 코드
     st.subheader("재학습 (서버 데이터 기준)")
