@@ -36,6 +36,24 @@ UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 # ========================================
 # GitHub Release에서 QC 데이터 자동 다운로드
 # ========================================
+def load_data_catalog(catalog_path):
+    try:
+        with open(catalog_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def find_file_url_in_catalog(catalog: dict, filename: str) -> str | None:
+    for item in catalog.get("files", []):
+        if item.get("filename") == filename:
+            return item.get("url")
+    return None
+
+def download_to_path(url: str, dst_path):
+    dst_path.parent.mkdir(parents=True, exist_ok=True)
+    # GitHub release asset은 302 redirect가 뜰 수 있어서 urlretrieve/urllib가 안정적
+    urllib.request.urlretrieve(url, dst_path)
+
 def load_data_catalog_json(catalog_path):
     if not catalog_path.exists():
         return None
@@ -98,15 +116,46 @@ def running_on_streamlit_cloud() -> bool:
 
 if running_on_streamlit_cloud():
     # Cloud에서는 QC 데이터를 GitHub Release에서 다운로드
-    if not (QC_DIR / "master_catalog.parquet").exists():
-        download_qc_data_from_github()
+    qc_local_path = QC_DIR / "master_catalog.parquet"
+
+    if not qc_local_path.exists():
+        if not catalog:
+            st.error("data_catalog.json not loaded (catalog is None/empty).")
+        else:
+            found = False
+            for item in catalog.get("files", []):
+                if item.get("filename") == "master_catalog.parquet":
+                    ensure_asset_download(item["url"], qc_local_path)
+                    found = True
+                    break
+
+            if not found:
+                st.error("master_catalog.parquet entry not found in assets/data_catalog.json")
 
 
 # ✅ cutoff 먼저 정의
 cutoff = int(st.sidebar.selectbox("Cutoff", [10, 20, 24, 30, 40], index=1))
+
 OPS_DIR = PROJECT_ROOT / "outputs" / "qc_performance_analysis"
-parquet_path = OPS_DIR / f"ops_decisions_cutoff_{cutoff}.parquet"
+OPS_DIR.mkdir(parents=True, exist_ok=True)
+
+ops_filename = f"ops_decisions_cutoff_{cutoff}.parquet"
+parquet_path = OPS_DIR / ops_filename
 csv_path     = OPS_DIR / f"ops_decisions_cutoff_{cutoff}.csv"
+
+# ✅ Streamlit Cloud에서 ops decisions parquet 자동 다운로드
+if running_on_streamlit_cloud():
+    if not parquet_path.exists():
+        ops_url = find_file_url_in_catalog(catalog, ops_filename)
+        if ops_url:
+            try:
+                download_to_path(ops_url, parquet_path)
+            except Exception as e:
+                st.warning(f"Failed to download ops decisions ({ops_filename}): {e}")
+        else:
+            st.warning(
+                f"Ops decisions file for cutoff={cutoff} not found in data_catalog.json: {ops_filename}"
+            )
 
 # ========== 수정된 코드 ==========
 # Data Catalog는 좌측 메뉴로만 표시하고, 메인에서는 숨김

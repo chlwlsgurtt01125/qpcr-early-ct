@@ -2,29 +2,29 @@
 QC Performance Analysis Summary
 ============================================================
 
-Cutoff: 20
+Cutoff: 30
 Total samples: 130
 
 --- Overall Performance ---
-MAE: 3.240 cycles
-RMSE: 5.183 cycles
-P(|error| ≤ 0.5): 23.8%
-P(|error| ≤ 1.0): 37.7%
-Mean Fold Error: 9069.69x
+MAE: 3.078 cycles
+RMSE: 4.791 cycles
+P(|error| ≤ 0.5): 21.5%
+P(|error| ≤ 1.0): 36.9%
+Mean Fold Error: 9491.73x
 
 --- Performance by QC Status ---
 
 PASS: 39 samples
-  MAE: 0.946
-  P(≤0.5): 48.7%
-  P(≤1.0): 69.2%
+  MAE: 0.732
+  P(≤0.5): 46.2%
+  P(≤1.0): 64.1%
 
 FAIL: 89 samples
-  MAE: 4.189
-  P(≤0.5): 13.5%
-  P(≤1.0): 24.7%
+  MAE: 4.048
+  P(≤0.5): 11.2%
+  P(≤1.0): 25.8%
 
 FLAG: 2 samples
-  MAE: 5.755
+  MAE: 5.675
   P(≤0.5): 0.0%
   P(≤1.0): 0.0%
