@@ -279,17 +279,23 @@ if st.session_state.show_data_catalog:
     else:
         st.info("QC Status by Ct Bin 데이터가 없습니다.")
 
-    excluded_df = df[df["qc_status"] != "PASS"]
+    excluded_df = df[df["qc_status"] != "PASS"].copy()
     if not excluded_df.empty:
         st.subheader("🔍 Exclusion Analysis - Top 10 Reasons")
-        reasons = excluded_df["exclusion_reason"].value_counts().head(10).reset_index()
+        # 실제 이유만 필터 (N/A 제외)
+        reasons = excluded_df[
+            (excluded_df["exclusion_reason"] != "N/A") &
+            (excluded_df["exclusion_reason"] != "No specific reason") &
+            (excluded_df["exclusion_reason"].notna())
+        ]["exclusion_reason"].value_counts().head(10).reset_index()
+        
         if not reasons.empty and reasons["count"].sum() > 0:
             fig_ex = px.bar(reasons, x="count", y="exclusion_reason", orientation="h",
                             title="Top 10 Exclusion Reasons")
-            fig_ex.update_layout(height=500)
+            fig_ex.update_layout(height=500, showlegend=False)
             st.plotly_chart(fig_ex, use_container_width=True)
         else:
-            st.info("Excluded 샘플이 없거나 exclusion_reason이 모두 비어있습니다.")
+            st.info("실제 exclusion reason이 없습니다 (대부분 N/A). QC 스크립트에서 이유를 더 자세히 기록하세요.")
     else:
         st.info("Excluded 샘플이 없습니다.")
 
@@ -1753,13 +1759,34 @@ cutoffs = discover_cutoffs(MODELS_DIR)
 if not cutoffs:
     st.error(f"모델을 찾지 못했어: {MODELS_DIR} (ct_xgb_cutoff_*.json 없음)")
     st.stop()
+    
+# discover_cutoffs(MODELS_DIR) 후, cutoff selectbox 전에 통째로
+
 with st.sidebar:
-    st.title("CPHOTONICS | Early Ct Predictor")  # 앱 제목 사이드바에
-    if st.button("📊 Data Quality Control & Catalog", type="primary"):
+    st.title("CPHOTONICS | Early Ct Predictor")
+    
+    # 최상단 큰 빨간 버튼 (항상 보임)
+    if st.button("📊 Data Quality Control & Catalog", type="primary", use_container_width=True):
         st.session_state.show_data_catalog = True
-    if st.button("🔙 Back to Main"):
-        st.session_state.show_data_catalog = False    
+    
+    # 대시보드 모드일 때만 Back 버튼 보임
+    if st.session_state.get("show_data_catalog", False):
+        if st.button("🔙 Back to Main", use_container_width=True):
+            st.session_state.show_data_catalog = False
+    
     st.divider()
+    
+    # 기존 cutoff 등 (이 아래에 그대로)
+    best = get_best_cutoff_from_report()
+    default_cutoff = best if (best in cutoffs) else (30 if 30 in cutoffs else cutoffs[-1] if cutoffs else 20)
+    cutoff = int(st.selectbox(
+        "Cutoff(사용 cycle 수)",
+        cutoffs,
+        index=cutoffs.index(default_cutoff) if default_cutoff in cutoffs else 0,
+        key="sidebar_cutoff",
+    ))
+    # ... min_c, max_c 등 나머지
+    # ... 나머지 기존 코드
     st.subheader("재학습 (서버 데이터 기준)")
     min_c = st.number_input("min_cutoff", min_value=1, max_value=200, value=10, step=1, key="sidebar_min_c")
     max_c = st.number_input("max_cutoff", min_value=1, max_value=200, value=40, step=1, key="sidebar_max_c")
