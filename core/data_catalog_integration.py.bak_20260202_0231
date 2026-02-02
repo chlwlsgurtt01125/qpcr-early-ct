@@ -1,0 +1,310 @@
+"""
+Streamlit App에 추가할 Data Catalog 섹션
+Long format 데이터를 Wide format으로 변환하여 QC 분석
+"""
+
+import streamlit as st
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+from pathlib import Path
+import sys
+
+# 프로젝트 루트 추가 (기존 앱과 동일한 방식)
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from core.qc_analyzer import QPCRQualityControl
+
+
+def long_to_wide_for_qc(df_long: pd.DataFrame) -> pd.DataFrame:
+    """
+    Long format (run_id, well_id, cycle, fluorescence, cq) 
+    → Wide format (well_id, ct_true, cycle_1, cycle_2, ..., cycle_40)
+    
+    Args:
+        df_long: master_long.parquet의 데이터프레임
+    
+    Returns:
+        Wide format 데이터프레임
+    """
+    # 1. Cycle별 형광값을 Wide로 변환
+    pivot = df_long.pivot_table(
+        index=['run_id', 'well_id'],
+        columns='cycle',
+        values='fluorescence',
+        aggfunc='first'
+    ).reset_index()
+    
+    # 컬럼명 변경: 1,2,3... → cycle_1, cycle_2, ...
+    rename_dict = {col: f'cycle_{col}' for col in pivot.columns if isinstance(col, int)}
+    pivot.rename(columns=rename_dict, inplace=True)
+    
+    # 2. Ct 값 추가 (각 well의 첫 번째 cq 값)
+    ct_df = df_long.groupby(['run_id', 'well_id'])['cq'].first().reset_index()
+    ct_df.rename(columns={'cq': 'ct_true'}, inplace=True)
+    
+    # 3. 병합
+    wide_df = pivot.merge(ct_df, on=['run_id', 'well_id'], how='left')
+    
+    # 4. 샘플 타입 추가 (있다면)
+    if 'sample_type' in df_long.columns:
+        sample_type = df_long.groupby(['run_id', 'well_id'])['sample_type'].first().reset_index()
+        wide_df = wide_df.merge(sample_type, on=['run_id', 'well_id'], how='left')
+    
+    return wide_df
+
+
+def render_data_catalog_section():
+    """
+    Streamlit 앱에 추가할 Data Catalog 섹션
+    기존 streamlit_app.py의 탭 또는 섹션으로 추가
+    """
+    st.header("📊 Data Catalog & QC Analysis")
+    
+    st.markdown("""
+    전체 학습 데이터에 대한 QC 분석 결과입니다.
+    - **PASS**: 모든 QC 기준 통과
+    - **FAIL**: 형태 이상 또는 극단적 Ct 값
+    - **FLAG**: 검토 필요 (Late Ct, Very Low Ct)
+    """)
+    
+    # === 데이터 로드 ===
+    master_long_path = PROJECT_ROOT / "data" / "canonical" / "master_long.parquet"
+    
+    if not master_long_path.exists():
+        st.warning("master_long.parquet 파일이 없습니다. 데이터를 먼저 준비해주세요.")
+        return
+    
+    # 캐싱으로 성능 최적화
+    @st.cache_data
+    def load_and_analyze_data():
+        # Long format 로드
+        df_long = pd.read_parquet(master_long_path)
+        
+        # Wide format으로 변환
+        df_wide = long_to_wide_for_qc(df_long)
+        
+        # QC 분석 실행
+        qc = QPCRQualityControl()
+        catalog = qc.create_catalog(df_wide)
+        
+        # run_id 정보 추가
+        catalog = catalog.merge(
+            df_wide[['run_id']].reset_index(drop=True),
+            left_on='row_index',
+            right_index=True,
+            how='left'
+        )
+        
+        excluded_report = qc.create_excluded_report(catalog)
+        
+        return catalog, excluded_report, df_long, df_wide
+    
+    with st.spinner("🔬 QC 분석 실행 중..."):
+        catalog, excluded_report, df_long, df_wide = load_and_analyze_data()
+    
+    # === 요약 통계 ===
+    st.subheader("📈 Summary Statistics")
+    
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    
+    total = len(catalog)
+    pass_count = (catalog['qc_status'] == 'PASS').sum()
+    fail_count = (catalog['qc_status'] == 'FAIL').sum()
+    flag_count = (catalog['qc_status'] == 'FLAG').sum()
+    usable_count = catalog['usable'].sum()
+    excluded_count = total - usable_count
+    
+    col1.metric("Total Wells", f"{total:,}")
+    col2.metric("✅ PASS", f"{pass_count:,}", f"{pass_count/total*100:.1f}%")
+    col3.metric("❌ FAIL", f"{fail_count:,}", f"{fail_count/total*100:.1f}%")
+    col4.metric("⚠️ FLAG", f"{flag_count:,}", f"{flag_count/total*100:.1f}%")
+    col5.metric("🟢 Usable", f"{usable_count:,}", f"{usable_count/total*100:.1f}%")
+    col6.metric("🔴 Excluded", f"{excluded_count:,}", f"{excluded_count/total*100:.1f}%")
+    
+    # === 시각화 ===
+    st.subheader("📊 Visualizations")
+    
+    viz_col1, viz_col2 = st.columns(2)
+    
+    with viz_col1:
+        # QC Status 분포
+        status_counts = catalog['qc_status'].value_counts()
+        fig_status = px.pie(
+            values=status_counts.values,
+            names=status_counts.index,
+            title="QC Status Distribution",
+            color=status_counts.index,
+            color_discrete_map={'PASS': 'green', 'FAIL': 'red', 'FLAG': 'orange'}
+        )
+        st.plotly_chart(fig_status, use_container_width=True)
+    
+    with viz_col2:
+        # Ct Bin 분포
+        bin_counts = catalog['ct_bin'].value_counts().sort_index()
+        fig_bins = px.bar(
+            x=bin_counts.index,
+            y=bin_counts.values,
+            title="Ct Bin Distribution",
+            labels={'x': 'Ct Bin', 'y': 'Count'},
+            color=bin_counts.values,
+            color_continuous_scale='Viridis'
+        )
+        st.plotly_chart(fig_bins, use_container_width=True)
+    
+    # === Fail Reason 분석 ===
+    if excluded_count > 0:
+        st.subheader("🔍 Exclusion Analysis")
+        
+        fail_reasons = catalog[~catalog['usable']]['fail_reason'].value_counts().head(10)
+        
+        fig_reasons = px.bar(
+            x=fail_reasons.values,
+            y=fail_reasons.index,
+            orientation='h',
+            title="Top 10 Exclusion Reasons",
+            labels={'x': 'Count', 'y': 'Fail Reason'}
+        )
+        fig_reasons.update_layout(height=400)
+        st.plotly_chart(fig_reasons, use_container_width=True)
+    
+    # === QC Status by Ct Bin ===
+    st.subheader("🎯 QC Status by Ct Bin")
+    
+    status_by_bin = pd.crosstab(catalog['ct_bin'], catalog['qc_status'])
+    
+    fig_status_bin = px.bar(
+        status_by_bin,
+        barmode='stack',
+        title="QC Status Distribution per Ct Bin",
+        labels={'value': 'Count', 'ct_bin': 'Ct Bin'},
+        color_discrete_map={'PASS': 'green', 'FAIL': 'red', 'FLAG': 'orange'}
+    )
+    fig_status_bin.update_layout(height=400)
+    st.plotly_chart(fig_status_bin, use_container_width=True)
+    
+    # === 필터링 및 테이블 표시 ===
+    st.subheader("📋 Master Catalog (Filterable)")
+    
+    filter_col1, filter_col2, filter_col3 = st.columns(3)
+    
+    with filter_col1:
+        filter_qc_status = st.multiselect(
+            "QC Status",
+            options=['PASS', 'FAIL', 'FLAG'],
+            default=['PASS', 'FAIL', 'FLAG']
+        )
+    
+    with filter_col2:
+        filter_ct_bins = st.multiselect(
+            "Ct Bin",
+            options=sorted(catalog['ct_bin'].unique()),
+            default=sorted(catalog['ct_bin'].unique())
+        )
+    
+    with filter_col3:
+        filter_run = st.multiselect(
+            "Run ID",
+            options=sorted(catalog['run_id'].unique()) if 'run_id' in catalog.columns else [],
+            default=sorted(catalog['run_id'].unique()) if 'run_id' in catalog.columns else []
+        )
+    
+    # 필터 적용
+    filtered_catalog = catalog[
+        (catalog['qc_status'].isin(filter_qc_status)) &
+        (catalog['ct_bin'].isin(filter_ct_bins))
+    ]
+    
+    if filter_run and 'run_id' in catalog.columns:
+        filtered_catalog = filtered_catalog[filtered_catalog['run_id'].isin(filter_run)]
+    
+    st.write(f"**Showing {len(filtered_catalog):,} / {len(catalog):,} wells**")
+    
+    # 테이블 표시
+    display_columns = ['well_id', 'ct_value', 'ct_bin', 'qc_status', 'fail_reason', 
+                      'usable', 'r2', 'snr']
+    if 'run_id' in filtered_catalog.columns:
+        display_columns.insert(0, 'run_id')
+    
+    st.dataframe(
+        filtered_catalog[display_columns].style.format({
+            'ct_value': '{:.2f}',
+            'r2': '{:.3f}',
+            'snr': '{:.2f}'
+        }).apply(
+            lambda x: ['background-color: #d4edda' if v == 'PASS' else 
+                      'background-color: #f8d7da' if v == 'FAIL' else
+                      'background-color: #fff3cd' if v == 'FLAG' else ''
+                      for v in x],
+            subset=['qc_status']
+        ),
+        use_container_width=True,
+        height=400
+    )
+    
+    # === Excluded Report ===
+    if len(excluded_report) > 0:
+        st.subheader("🚫 Excluded Samples Report")
+        
+        st.write(f"**Total excluded: {len(excluded_report):,} wells**")
+        
+        # Major reason 분포
+        major_reason_counts = excluded_report['excluded_major_reason'].value_counts()
+        
+        fig_major = px.pie(
+            values=major_reason_counts.values,
+            names=major_reason_counts.index,
+            title="Major Exclusion Categories"
+        )
+        st.plotly_chart(fig_major, use_container_width=True)
+        
+        # 상세 테이블
+        st.dataframe(
+            excluded_report.style.format({
+                'evidence_r2': '{:.3f}',
+                'evidence_snr': '{:.2f}',
+                'evidence_ct': '{:.2f}'
+            }),
+            use_container_width=True,
+            height=400
+        )
+    
+    # === 다운로드 ===
+    st.subheader("💾 Download Reports")
+    
+    download_col1, download_col2 = st.columns(2)
+    
+    with download_col1:
+        catalog_csv = catalog.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 Download Master Catalog (CSV)",
+            data=catalog_csv,
+            file_name="qpcr_data_catalog.csv",
+            mime="text/csv"
+        )
+    
+    with download_col2:
+        if len(excluded_report) > 0:
+            excluded_csv = excluded_report.to_csv(index=False).encode('utf-8-sig')
+            st.download_button(
+                label="📥 Download Excluded Report (CSV)",
+                data=excluded_csv,
+                file_name="qpcr_excluded_report.csv",
+                mime="text/csv"
+            )
+
+
+# === 사용 예시: streamlit_app.py에 추가할 코드 ===
+"""
+streamlit_app.py의 적절한 위치에 추가:
+
+# 기존 탭들 아래에 추가
+tab_datacatalog = st.tabs(["Data Catalog"])
+
+with tab_datacatalog:
+    from core.streamlit_data_catalog_integration import render_data_catalog_section
+    render_data_catalog_section()
+"""

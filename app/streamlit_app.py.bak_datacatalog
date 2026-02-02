@@ -19,17 +19,6 @@ import argparse
 
 # --- make sure PROJECT_ROOT is importable so "core" works even when launched from other dirs ---
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-OPS_PATH = PROJECT_ROOT / "outputs" / "qc_performance_analysis" / "ops_decisions_cutoff_20.parquet"
-@st.cache_data
-def load_ops(path: Path) -> pd.DataFrame:
-    return pd.read_parquet(path)
-
-if OPS_PATH.exists():
-    df_ops = load_ops(OPS_PATH)
-    st.success(f"Loaded ops decisions: {OPS_PATH}")
-else:
-    st.warning(f"Ops decisions not found: {OPS_PATH}. Run analyze_qc_performance.py first.")
-    df_ops = pd.DataFrame()
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -46,35 +35,6 @@ st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
 # -------------------------
 # Utilities
 # -------------------------
-def decision_from_qc(qc_status: str) -> str:
-    qc_status = str(qc_status).upper().strip()
-    if qc_status == "PASS":
-        return "PREDICT"
-    if qc_status == "FLAG":
-        return "WARN"
-    return "RERUN"
-    
-    qc_path = PROJECT_ROOT / "outputs" / "qc" / "master_catalog.parquet"
-    qc = pd.read_parquet(qc_path)[["well_uid", "qc_status", "fail_reason"]].copy()
-    
-    pred = predictions.copy()
-    pred["well_uid"] = pred["well_id"].astype(str)
-    
-    merged = pred.merge(qc, on="well_uid", how="left")
-    
-    merged["final_decision"] = merged["qc_status"].astype(str).map(decision_from_qc)
-    
-    merged["ct_output"] = np.where(
-        merged["final_decision"].isin(["PREDICT", "WARN"]),
-        merged["pred_ct"].astype(float),
-        np.nan
-    )
-    
-    merged["decision_note"] = merged["final_decision"].map({
-        "PREDICT": "use prediction",
-        "WARN": "use prediction with caution (FLAG)",
-        "RERUN": "do not use prediction; rerun recommended (FAIL)"
-    })
 
 def get_reports_root() -> Path:
     # 1) 가장 우선: 레포 루트의 reports/ (Streamlit Cloud 배포용)
@@ -2086,4 +2046,3 @@ try:
     st.caption("VERSION: " + (PROJECT_ROOT / "VERSION.txt").read_text().strip())
 except Exception:
     st.caption("VERSION: (missing)")
-

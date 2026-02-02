@@ -1,0 +1,16 @@
+total 252
+drwxrwxr-x 10 cphotonic cphotonic  4096 Feb  2 02:17 .
+drwxrwxr-x 11 cphotonic cphotonic  4096 Feb  2 02:17 ..
+drwxrwxr-x  2 cphotonic cphotonic  4096 Jan 21 09:00 core
+drwxrwxr-x  6 cphotonic cphotonic  4096 Jan 21 10:54 data
+drwxrwxr-x  2 cphotonic cphotonic  4096 Jan 21 09:08 models
+drwxrwxr-x  2 cphotonic cphotonic  4096 Feb  2 02:17 pages
+drwxrwxr-x  2 cphotonic cphotonic  4096 Jan 21 09:01 _pages_disabled
+drwxrwxr-x  2 cphotonic cphotonic  4096 Jan 23 08:40 __pycache__
+drwxrwxr-x  2 cphotonic cphotonic  4096 Jan 21 08:26 reviews
+-rw-rw-r--  1 cphotonic cphotonic 81951 Jan 30 09:48 streamlit_app.py
+-rw-rw-r--  1 cphotonic cphotonic 13668 Jan 19 08:35 streamlit_app.py.bak_20260119_083532
+-rw-rw-r--  1 cphotonic cphotonic 14095 Jan 21 08:26 streamlit_app.py.bak_20260121_082616
+-rw-rw-r--  1 cphotonic cphotonic 14095 Jan 21 08:53 streamlit_app.py.bak_20260121_085321
+-rw-rw-r--  1 cphotonic cphotonic 81564 Jan 30 09:47 streamlit_app.py.bak_datacatalog
+drwxrwxr-x  2 cphotonic cphotonic  4096 Jan 19 07:00 uploads

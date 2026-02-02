@@ -1,0 +1,81 @@
+============================================================
+NEXT ACTIONS REPORT (QC x Prediction)
+============================================================
+Generated: 2026-02-02 04:26:53
+
+[Auto-discovered artifacts]
+- merged_parquet: /home/cphotonic/qpcr_v2/outputs/qc_performance_analysis/qc_pred_merged.parquet
+- bucket_file:    /home/cphotonic/qpcr_v2/outputs/qc_performance_analysis/bucket_performance.csv
+- figures_dir:    /home/cphotonic/qpcr_v2/outputs/qc_performance_analysis/figures
+- figures:        performance_by_ct_bin.png, performance_by_fail_reason.png, performance_by_qc_status.png
+
+[Overall]
+- N: 130
+- MAE:  2.988
+- RMSE: 4.863
+- acc(|err|<=0.5):  24.6%
+- acc(|err|<=1.0):  39.2%
+- mean fold_error (2^|err|): 8740.52x
+
+------------------------------------------------------------
+1) fail_reason별 MAE 상위 5개 (worst by MAE)
+------------------------------------------------------------
+| fail_reason    |   n |   mae |   rmse | acc_0p5   | acc_1p0   |   fold_error_mean |
+|:---------------|----:|------:|-------:|:----------|:----------|------------------:|
+| CT_ULTRA_LATE  |   1 | 7.849 |  7.849 | 0.0%      | 0.0%      |           230.596 |
+| NON_SIGMOID    |  59 | 4.693 |  6.456 | 11.9%     | 18.6%     |         15246     |
+| CT_LATE        |   1 | 3.661 |  3.661 | 0.0%      | 0.0%      |            12.653 |
+| NOISY_BASELINE |  30 | 2.103 |  3.811 | 20.0%     | 43.3%     |          7878.01  |
+| OK             |  39 | 0.946 |  1.639 | 48.7%     | 69.2%     |             4.395 |
+
+------------------------------------------------------------
+2) fail_reason별 acc_0p5 하위 5개 (worst by accuracy@0.5)
+------------------------------------------------------------
+| fail_reason    |   n |   mae |   rmse | acc_0p5   | acc_1p0   |   fold_error_mean |
+|:---------------|----:|------:|-------:|:----------|:----------|------------------:|
+| CT_LATE        |   1 | 3.661 |  3.661 | 0.0%      | 0.0%      |            12.653 |
+| CT_ULTRA_LATE  |   1 | 7.849 |  7.849 | 0.0%      | 0.0%      |           230.596 |
+| NON_SIGMOID    |  59 | 4.693 |  6.456 | 11.9%     | 18.6%     |         15246     |
+| NOISY_BASELINE |  30 | 2.103 |  3.811 | 20.0%     | 43.3%     |          7878.01  |
+| OK             |  39 | 0.946 |  1.639 | 48.7%     | 69.2%     |             4.395 |
+
+------------------------------------------------------------
+3) ct_bin별 MAE 상위 5개 (worst Ct ranges)
+------------------------------------------------------------
+| ct_bin           |   n |    mae |   rmse | acc_0p5   | acc_1p0   |   fold_error_mean |
+|:-----------------|----:|-------:|-------:|:----------|:----------|------------------:|
+| BIN_G            |   1 | 17.85  | 17.85  | 0.0%      | 0.0%      |        236185     |
+| BIN_E            |   3 |  8.969 | 11.57  | 0.0%      | 0.0%      |        215688     |
+| BIN_OUT_OF_RANGE |   7 |  8.933 | 10.256 | 0.0%      | 0.0%      |         29545.9   |
+| BIN_D            |  10 |  6.355 |  8.05  | 0.0%      | 0.0%      |          4227.84  |
+| BIN_C            | 109 |  1.996 |  2.983 | 29.4%     | 46.8%     |            35.952 |
+
+------------------------------------------------------------
+4) fold_error_mean 상위 5개 (largest fold error buckets)
+   (bucket = qc_status + fail_reason + ct_bin)
+------------------------------------------------------------
+| qc_status   | fail_reason    | ct_bin           |   n |    mae | acc_0p5   |   fold_error_mean |
+|:------------|:---------------|:-----------------|----:|-------:|:----------|------------------:|
+| FAIL        | NON_SIGMOID    | BIN_E            |   2 | 11.623 | 0.0%      |        323526     |
+| FAIL        | NOISY_BASELINE | BIN_G            |   1 | 17.85  | 0.0%      |        236185     |
+| FAIL        | NON_SIGMOID    | BIN_OUT_OF_RANGE |   4 | 11.622 | 0.0%      |         51635.8   |
+| FAIL        | NON_SIGMOID    | BIN_D            |   7 |  7.633 | 0.0%      |          6034.89  |
+| FLAG        | CT_ULTRA_LATE  | BIN_OUT_OF_RANGE |   1 |  7.849 | 0.0%      |           230.596 |
+
+------------------------------------------------------------
+5) Top 3 worst bucket (min_n=5)
+   Ranking: MAE desc → acc_0p5 asc → fold_error_mean desc
+------------------------------------------------------------
+| qc_status   | fail_reason    | ct_bin   |   n |   mae |   rmse | acc_0p5   | acc_1p0   |   fold_error_mean |
+|:------------|:---------------|:---------|----:|------:|-------:|:----------|:----------|------------------:|
+| FAIL        | NON_SIGMOID    | BIN_D    |   7 | 7.633 |  9.355 | 0.0%      | 0.0%      |          6034.89  |
+| FAIL        | NON_SIGMOID    | BIN_C    |  46 | 3.342 |  4.223 | 15.2%     | 23.9%     |            79.878 |
+| FAIL        | NOISY_BASELINE | BIN_C    |  27 | 1.438 |  1.888 | 22.2%     | 48.1%     |             5.032 |
+
+[Suggested next actions (auto)]
+- (1) qc_status=FAIL, fail_reason=NON_SIGMOID, ct_bin=BIN_D | MAE=7.633, acc@0.5=  0.0%, fold_mean=6034.89x
+    - Action: 해당 fail_reason QC 규칙에 맞춰 데이터 정제/제외 또는 전처리 재검토
+- (2) qc_status=FAIL, fail_reason=NON_SIGMOID, ct_bin=BIN_C | MAE=3.342, acc@0.5= 15.2%, fold_mean=79.88x
+    - Action: 해당 fail_reason QC 규칙에 맞춰 데이터 정제/제외 또는 전처리 재검토
+- (3) qc_status=FAIL, fail_reason=NOISY_BASELINE, ct_bin=BIN_C | MAE=1.438, acc@0.5= 22.2%, fold_mean=5.03x
+    - Action: 해당 fail_reason QC 규칙에 맞춰 데이터 정제/제외 또는 전처리 재검토

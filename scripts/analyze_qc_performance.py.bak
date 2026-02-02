@@ -1,0 +1,449 @@
+#!/usr/bin/env python3
+"""
+QC 결과와 예측 결과를 well_uid로 결합하여 버킷별 성능 분석 리포트 생성
+
+outputs/qc_performance_analysis/ 폴더에 저장:
+- qc_pred_merged.parquet (QC + Predictions 병합)
+- bucket_performance.parquet (버킷별 성능 테이블)
+- bucket_performance.csv
+- figures/ (시각화)
+
+사용법:
+    python scripts/analyze_qc_performance.py
+    python scripts/analyze_qc_performance.py --cutoff 20 --predictions data/reports/model_xxx/predictions_long.parquet
+"""
+
+import sys
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import seaborn as sns
+import argparse
+
+# 프로젝트 루트 설정
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT))
+
+
+def calculate_bucket_metrics(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    버킷별 성능 메트릭 계산
+    
+    Args:
+        df: merged dataframe (qc + predictions)
+    
+    Returns:
+        bucket_performance dataframe
+    """
+    metrics_list = []
+    
+    # 버킷 정의
+    bucket_groups = {
+        'qc_status': df['qc_status'].unique(),
+        'fail_reason': df['fail_reason'].unique(),
+        'ct_bin': df['ct_bin'].unique(),
+    }
+    
+    for bucket_type, bucket_values in bucket_groups.items():
+        for bucket_value in bucket_values:
+            if pd.isna(bucket_value):
+                continue
+            
+            # 해당 버킷 데이터
+            bucket_df = df[df[bucket_type] == bucket_value].copy()
+            
+            if len(bucket_df) == 0:
+                continue
+            
+            # 기본 메트릭
+            errors = bucket_df['error'].values
+            abs_errors = np.abs(errors)
+            
+            # Fold-change 계산
+            fold_errors = 2 ** abs_errors
+            
+            # 메트릭 계산
+            metrics = {
+                'bucket_type': bucket_type,
+                'bucket_value': str(bucket_value),
+                'n_samples': len(bucket_df),
+                
+                # 기본 회귀 메트릭
+                'mae': np.mean(abs_errors),
+                'rmse': np.sqrt(np.mean(errors ** 2)),
+                'median_error': np.median(abs_errors),
+                
+                # 허용 범위 비율
+                'p_within_0.5': (abs_errors <= 0.5).sum() / len(abs_errors),
+                'p_within_1.0': (abs_errors <= 1.0).sum() / len(abs_errors),
+                'p_within_2.0': (abs_errors <= 2.0).sum() / len(abs_errors),
+                
+                # Fold-change 메트릭
+                'mean_fold_error': np.mean(fold_errors),
+                'median_fold_error': np.median(fold_errors),
+                'p_fold_below_1.5x': (fold_errors < 1.5).sum() / len(fold_errors),
+                'p_fold_below_2.0x': (fold_errors < 2.0).sum() / len(fold_errors),
+                
+                # 분포 통계
+                'error_std': np.std(errors),
+                'error_q25': np.percentile(abs_errors, 25),
+                'error_q75': np.percentile(abs_errors, 75),
+                'error_iqr': np.percentile(abs_errors, 75) - np.percentile(abs_errors, 25),
+            }
+            
+            metrics_list.append(metrics)
+    
+    return pd.DataFrame(metrics_list)
+
+
+def create_visualization(bucket_perf: pd.DataFrame, output_dir: Path):
+    """버킷별 성능 시각화"""
+    
+    fig_dir = output_dir / "figures"
+    fig_dir.mkdir(exist_ok=True)
+    
+    # 스타일 설정
+    sns.set_style("whitegrid")
+    plt.rcParams['figure.figsize'] = (14, 8)
+    plt.rcParams['font.size'] = 10
+    
+    # === Figure 1: QC Status별 성능 비교 ===
+    qc_status_perf = bucket_perf[bucket_perf['bucket_type'] == 'qc_status'].copy()
+    
+    if len(qc_status_perf) > 0:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('Performance by QC Status', fontsize=16, fontweight='bold')
+        
+        # 샘플 수
+        axes[0, 0].bar(qc_status_perf['bucket_value'], qc_status_perf['n_samples'], 
+                      color=['green' if x=='PASS' else 'red' if x=='FAIL' else 'orange' 
+                            for x in qc_status_perf['bucket_value']])
+        axes[0, 0].set_title('Sample Count by QC Status')
+        axes[0, 0].set_ylabel('Count')
+        axes[0, 0].tick_params(axis='x', rotation=45)
+        
+        # MAE
+        axes[0, 1].bar(qc_status_perf['bucket_value'], qc_status_perf['mae'],
+                      color=['green' if x=='PASS' else 'red' if x=='FAIL' else 'orange' 
+                            for x in qc_status_perf['bucket_value']])
+        axes[0, 1].set_title('Mean Absolute Error (MAE)')
+        axes[0, 1].set_ylabel('MAE (cycles)')
+        axes[0, 1].tick_params(axis='x', rotation=45)
+        axes[0, 1].axhline(y=0.5, color='green', linestyle='--', alpha=0.5, label='0.5 cycle')
+        axes[0, 1].axhline(y=1.0, color='orange', linestyle='--', alpha=0.5, label='1.0 cycle')
+        axes[0, 1].legend()
+        
+        # P(|error| ≤ 0.5)
+        axes[1, 0].bar(qc_status_perf['bucket_value'], qc_status_perf['p_within_0.5'] * 100,
+                      color=['green' if x=='PASS' else 'red' if x=='FAIL' else 'orange' 
+                            for x in qc_status_perf['bucket_value']])
+        axes[1, 0].set_title('Accuracy within 0.5 cycles')
+        axes[1, 0].set_ylabel('Percentage (%)')
+        axes[1, 0].tick_params(axis='x', rotation=45)
+        axes[1, 0].set_ylim(0, 100)
+        
+        # Mean Fold Error
+        axes[1, 1].bar(qc_status_perf['bucket_value'], qc_status_perf['mean_fold_error'],
+                      color=['green' if x=='PASS' else 'red' if x=='FAIL' else 'orange' 
+                            for x in qc_status_perf['bucket_value']])
+        axes[1, 1].set_title('Mean Fold Error')
+        axes[1, 1].set_ylabel('Fold Change')
+        axes[1, 1].tick_params(axis='x', rotation=45)
+        axes[1, 1].axhline(y=1.5, color='green', linestyle='--', alpha=0.5, label='1.5x')
+        axes[1, 1].axhline(y=2.0, color='orange', linestyle='--', alpha=0.5, label='2.0x')
+        axes[1, 1].legend()
+        
+        plt.tight_layout()
+        fig.savefig(fig_dir / "performance_by_qc_status.png", dpi=300, bbox_inches='tight')
+        print(f"   ✅ {fig_dir / 'performance_by_qc_status.png'}")
+        plt.close()
+    
+    # === Figure 2: Fail Reason별 성능 비교 (Top 10) ===
+    fail_reason_perf = bucket_perf[bucket_perf['bucket_type'] == 'fail_reason'].copy()
+    fail_reason_perf = fail_reason_perf.sort_values('n_samples', ascending=False).head(10)
+    
+    if len(fail_reason_perf) > 0:
+        fig, axes = plt.subplots(2, 2, figsize=(16, 10))
+        fig.suptitle('Performance by Fail Reason (Top 10)', fontsize=16, fontweight='bold')
+        
+        # 샘플 수
+        axes[0, 0].barh(fail_reason_perf['bucket_value'], fail_reason_perf['n_samples'])
+        axes[0, 0].set_title('Sample Count by Fail Reason')
+        axes[0, 0].set_xlabel('Count')
+        axes[0, 0].invert_yaxis()
+        
+        # MAE
+        axes[0, 1].barh(fail_reason_perf['bucket_value'], fail_reason_perf['mae'], color='coral')
+        axes[0, 1].set_title('Mean Absolute Error (MAE)')
+        axes[0, 1].set_xlabel('MAE (cycles)')
+        axes[0, 1].axvline(x=0.5, color='green', linestyle='--', alpha=0.5)
+        axes[0, 1].axvline(x=1.0, color='orange', linestyle='--', alpha=0.5)
+        axes[0, 1].invert_yaxis()
+        
+        # P(|error| ≤ 1.0)
+        axes[1, 0].barh(fail_reason_perf['bucket_value'], fail_reason_perf['p_within_1.0'] * 100, 
+                       color='steelblue')
+        axes[1, 0].set_title('Accuracy within 1.0 cycles')
+        axes[1, 0].set_xlabel('Percentage (%)')
+        axes[1, 0].set_xlim(0, 100)
+        axes[1, 0].invert_yaxis()
+        
+        # Mean Fold Error
+        axes[1, 1].barh(fail_reason_perf['bucket_value'], fail_reason_perf['mean_fold_error'],
+                       color='mediumpurple')
+        axes[1, 1].set_title('Mean Fold Error')
+        axes[1, 1].set_xlabel('Fold Change')
+        axes[1, 1].axvline(x=2.0, color='orange', linestyle='--', alpha=0.5)
+        axes[1, 1].invert_yaxis()
+        
+        plt.tight_layout()
+        fig.savefig(fig_dir / "performance_by_fail_reason.png", dpi=300, bbox_inches='tight')
+        print(f"   ✅ {fig_dir / 'performance_by_fail_reason.png'}")
+        plt.close()
+    
+    # === Figure 3: Ct Bin별 성능 비교 ===
+    ct_bin_perf = bucket_perf[bucket_perf['bucket_type'] == 'ct_bin'].copy()
+    ct_bin_perf = ct_bin_perf.sort_values('bucket_value')
+    
+    if len(ct_bin_perf) > 0:
+        fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+        fig.suptitle('Performance by Ct Bin', fontsize=16, fontweight='bold')
+        
+        # 샘플 수
+        axes[0, 0].bar(range(len(ct_bin_perf)), ct_bin_perf['n_samples'], color='teal')
+        axes[0, 0].set_xticks(range(len(ct_bin_perf)))
+        axes[0, 0].set_xticklabels(ct_bin_perf['bucket_value'], rotation=45)
+        axes[0, 0].set_title('Sample Count by Ct Bin')
+        axes[0, 0].set_ylabel('Count')
+        
+        # MAE
+        axes[0, 1].plot(range(len(ct_bin_perf)), ct_bin_perf['mae'], marker='o', linewidth=2, markersize=8)
+        axes[0, 1].set_xticks(range(len(ct_bin_perf)))
+        axes[0, 1].set_xticklabels(ct_bin_perf['bucket_value'], rotation=45)
+        axes[0, 1].set_title('MAE Trend across Ct Bins')
+        axes[0, 1].set_ylabel('MAE (cycles)')
+        axes[0, 1].axhline(y=0.5, color='green', linestyle='--', alpha=0.5)
+        axes[0, 1].axhline(y=1.0, color='orange', linestyle='--', alpha=0.5)
+        axes[0, 1].grid(True, alpha=0.3)
+        
+        # P(|error| ≤ 0.5) & P(|error| ≤ 1.0)
+        x_pos = range(len(ct_bin_perf))
+        width = 0.35
+        axes[1, 0].bar([x - width/2 for x in x_pos], ct_bin_perf['p_within_0.5'] * 100, 
+                      width, label='≤ 0.5 cycles', color='green', alpha=0.7)
+        axes[1, 0].bar([x + width/2 for x in x_pos], ct_bin_perf['p_within_1.0'] * 100, 
+                      width, label='≤ 1.0 cycles', color='orange', alpha=0.7)
+        axes[1, 0].set_xticks(x_pos)
+        axes[1, 0].set_xticklabels(ct_bin_perf['bucket_value'], rotation=45)
+        axes[1, 0].set_title('Accuracy by Tolerance')
+        axes[1, 0].set_ylabel('Percentage (%)')
+        axes[1, 0].set_ylim(0, 100)
+        axes[1, 0].legend()
+        
+        # Fold Error Distribution
+        axes[1, 1].plot(range(len(ct_bin_perf)), ct_bin_perf['mean_fold_error'], 
+                       marker='s', linewidth=2, markersize=8, label='Mean', color='purple')
+        axes[1, 1].plot(range(len(ct_bin_perf)), ct_bin_perf['median_fold_error'], 
+                       marker='^', linewidth=2, markersize=8, label='Median', color='magenta', alpha=0.7)
+        axes[1, 1].set_xticks(range(len(ct_bin_perf)))
+        axes[1, 1].set_xticklabels(ct_bin_perf['bucket_value'], rotation=45)
+        axes[1, 1].set_title('Fold Error Distribution')
+        axes[1, 1].set_ylabel('Fold Change')
+        axes[1, 1].axhline(y=1.5, color='green', linestyle='--', alpha=0.5)
+        axes[1, 1].axhline(y=2.0, color='orange', linestyle='--', alpha=0.5)
+        axes[1, 1].legend()
+        axes[1, 1].grid(True, alpha=0.3)
+        
+        plt.tight_layout()
+        fig.savefig(fig_dir / "performance_by_ct_bin.png", dpi=300, bbox_inches='tight')
+        print(f"   ✅ {fig_dir / 'performance_by_ct_bin.png'}")
+        plt.close()
+
+
+def main():
+    parser = argparse.ArgumentParser(description='QC 결과와 예측 결과를 결합하여 성능 분석')
+    parser.add_argument('--predictions', type=str, 
+                       default=None,
+                       help='Predictions parquet 파일 경로 (기본: 자동 탐색)')
+    parser.add_argument('--cutoff', type=int, default=20,
+                       help='분석할 cutoff (기본: 20)')
+    args = parser.parse_args()
+    
+    print("=" * 60)
+    print("QC + Predictions 버킷별 성능 분석 (well_uid 기반)")
+    print("=" * 60)
+    
+    # 경로 설정
+    qc_catalog_path = PROJECT_ROOT / "outputs" / "qc" / "master_catalog.parquet"
+    
+    # Predictions 경로 자동 탐색
+    if args.predictions is None:
+        # 1. reports 폴더에서 찾기
+        reports_dir = PROJECT_ROOT / "data" / "reports"
+        if reports_dir.exists():
+            pred_files = list(reports_dir.glob("*/predictions_long.parquet"))
+            if pred_files:
+                predictions_path = sorted(pred_files, key=lambda x: x.stat().st_mtime)[-1]
+                print(f"\n📂 Auto-detected predictions: {predictions_path}")
+            else:
+                print("\n❌ No predictions_long.parquet found in data/reports/")
+                return
+        else:
+            print("\n❌ data/reports/ directory not found")
+            return
+    else:
+        predictions_path = Path(args.predictions)
+    
+    output_dir = PROJECT_ROOT / "outputs" / "qc_performance_analysis"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    print(f"\n📂 QC Catalog: {qc_catalog_path}")
+    print(f"📂 Predictions: {predictions_path}")
+    print(f"📂 Output: {output_dir}")
+    print(f"🎯 Cutoff: {args.cutoff}")
+    
+    # 1. QC Catalog 로드
+    if not qc_catalog_path.exists():
+        print(f"\n❌ QC catalog not found. Run: python scripts/save_qc_results.py")
+        return
+    
+    print("\n🔄 Loading QC catalog...")
+    qc_catalog = pd.read_parquet(qc_catalog_path)
+    print(f"   Loaded {len(qc_catalog):,} wells")
+    print(f"   Columns: {qc_catalog.columns.tolist()}")
+    print(f"   Sample well_uid: {qc_catalog['well_uid'].head(3).tolist()}")
+    
+    # 2. Predictions 로드
+    print("\n🔄 Loading predictions...")
+    predictions = pd.read_parquet(predictions_path)
+    print(f"   Loaded {len(predictions):,} rows")
+    print(f"   Columns: {predictions.columns.tolist()}")
+    
+    # cutoff 필터링
+    if 'cutoff' in predictions.columns:
+        predictions = predictions[predictions['cutoff'] == args.cutoff].copy()
+        print(f"   Filtered to cutoff={args.cutoff}: {len(predictions):,} rows")
+    
+    # predictions의 well_id를 well_uid로 사용
+    if 'well_id' in predictions.columns:
+        predictions['well_uid'] = predictions['well_id']
+        print(f"   Sample pred well_uid: {predictions['well_uid'].head(3).tolist()}")
+    else:
+        print(f"   ❌ No well_id column in predictions!")
+        return
+    
+    # 3. well_uid로 merge
+    print("\n🔄 Merging QC catalog with predictions on well_uid...")
+    
+    merged = qc_catalog.merge(
+        predictions,
+        on='well_uid',
+        how='inner',
+        suffixes=('_qc', '_pred')
+    )
+    
+    print(f"   Merged: {len(merged):,} rows")
+    
+    if len(merged) == 0:
+        print("\n❌ No matching wells found!")
+        print("\n🔍 Debugging info:")
+        print(f"   QC well_uid sample: {qc_catalog['well_uid'].head(5).tolist()}")
+        print(f"   Pred well_uid sample: {predictions['well_uid'].head(5).tolist()}")
+        print(f"   QC unique well_uid: {qc_catalog['well_uid'].nunique()}")
+        print(f"   Pred unique well_uid: {predictions['well_uid'].nunique()}")
+        return
+    
+    # 4. Error 계산
+    print("\n🔄 Calculating errors...")
+    
+    # Ct 컬럼 확인
+    true_ct_col = 'ct_value' if 'ct_value' in merged.columns else 'true_ct'
+    pred_ct_col = None
+    for col in ['pred_ct', 'predicted_ct', 'ct_pred']:
+        if col in merged.columns:
+            pred_ct_col = col
+            break
+    
+    if pred_ct_col is None:
+        print(f"   ❌ No predicted Ct column found. Columns: {merged.columns.tolist()}")
+        return
+    
+    merged['error'] = merged[pred_ct_col] - merged[true_ct_col]
+    merged['abs_error'] = merged['error'].abs()
+    merged['fold_error'] = 2 ** merged['abs_error']
+    
+    print(f"   Overall MAE: {merged['abs_error'].mean():.3f} cycles")
+    print(f"   Overall RMSE: {np.sqrt((merged['error'] ** 2).mean()):.3f} cycles")
+    print(f"   P(|error| ≤ 0.5): {(merged['abs_error'] <= 0.5).sum() / len(merged) * 100:.1f}%")
+    print(f"   P(|error| ≤ 1.0): {(merged['abs_error'] <= 1.0).sum() / len(merged) * 100:.1f}%")
+    
+    # 5. Merged 데이터 저장
+    print("\n💾 Saving merged data...")
+    merged_path = output_dir / "qc_pred_merged.parquet"
+    merged.to_parquet(merged_path, index=False)
+    print(f"   ✅ {merged_path}")
+    
+    # 6. 버킷별 성능 계산
+    print("\n🔄 Calculating bucket metrics...")
+    bucket_perf = calculate_bucket_metrics(merged)
+    print(f"   Generated {len(bucket_perf)} bucket metrics")
+    
+    # 7. 저장
+    print("\n💾 Saving bucket performance...")
+    
+    bucket_perf.to_parquet(output_dir / "bucket_performance.parquet", index=False)
+    print(f"   ✅ {output_dir / 'bucket_performance.parquet'}")
+    
+    bucket_perf.to_csv(output_dir / "bucket_performance.csv", index=False)
+    print(f"   ✅ {output_dir / 'bucket_performance.csv'}")
+    
+    # 8. 시각화
+    print("\n📊 Creating visualizations...")
+    create_visualization(bucket_perf, output_dir)
+    
+    # 9. 요약 리포트 생성
+    print("\n📝 Creating summary report...")
+    summary_lines = []
+    summary_lines.append("=" * 60)
+    summary_lines.append("QC Performance Analysis Summary")
+    summary_lines.append("=" * 60)
+    summary_lines.append(f"\nCutoff: {args.cutoff}")
+    summary_lines.append(f"Total samples: {len(merged):,}")
+    summary_lines.append(f"\n--- Overall Performance ---")
+    summary_lines.append(f"MAE: {merged['abs_error'].mean():.3f} cycles")
+    summary_lines.append(f"RMSE: {np.sqrt((merged['error'] ** 2).mean()):.3f} cycles")
+    summary_lines.append(f"P(|error| ≤ 0.5): {(merged['abs_error'] <= 0.5).sum() / len(merged) * 100:.1f}%")
+    summary_lines.append(f"P(|error| ≤ 1.0): {(merged['abs_error'] <= 1.0).sum() / len(merged) * 100:.1f}%")
+    summary_lines.append(f"Mean Fold Error: {merged['fold_error'].mean():.2f}x")
+    
+    # QC Status별 요약
+    summary_lines.append(f"\n--- Performance by QC Status ---")
+    for status in ['PASS', 'FAIL', 'FLAG']:
+        status_df = merged[merged['qc_status'] == status]
+        if len(status_df) > 0:
+            summary_lines.append(f"\n{status}: {len(status_df):,} samples")
+            summary_lines.append(f"  MAE: {status_df['abs_error'].mean():.3f}")
+            summary_lines.append(f"  P(≤0.5): {(status_df['abs_error'] <= 0.5).sum() / len(status_df) * 100:.1f}%")
+            summary_lines.append(f"  P(≤1.0): {(status_df['abs_error'] <= 1.0).sum() / len(status_df) * 100:.1f}%")
+    
+    summary_text = "\n".join(summary_lines)
+    
+    with open(output_dir / "summary_report.txt", "w") as f:
+        f.write(summary_text)
+    
+    print(summary_text)
+    
+    print("\n" + "=" * 60)
+    print("✅ QC 성능 분석 완료!")
+    print("=" * 60)
+    print(f"\n📂 Results saved to: {output_dir}")
+    print(f"   - qc_pred_merged.parquet")
+    print(f"   - bucket_performance.parquet")
+    print(f"   - bucket_performance.csv")
+    print(f"   - summary_report.txt")
+    print(f"   - figures/ (3 PNG files)")
+
+
+if __name__ == "__main__":
+    main()

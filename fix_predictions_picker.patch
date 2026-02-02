@@ -1,0 +1,120 @@
+diff --git a/scripts/analyze_qc_performance.py b/scripts/analyze_qc_performance.py
+index 1111111..2222222 100644
+--- a/scripts/analyze_qc_performance.py
++++ b/scripts/analyze_qc_performance.py
+@@ -1,20 +1,35 @@
+ import os
+ import glob
+ import argparse
+ import pandas as pd
++import pyarrow.parquet as pq
+
++def _parquet_num_rows(path: str) -> int:
++    try:
++        return pq.ParquetFile(path).metadata.num_rows
++    except Exception:
++        # fallback (slower)
++        try:
++            return len(pd.read_parquet(path))
++        except Exception:
++            return -1
++
++def pick_best_predictions(candidates):
++    """Pick predictions file with the largest number of rows (avoid tiny debug files)."""
++    scored = []
++    for p in candidates:
++        n = _parquet_num_rows(p)
++        scored.append((n, p))
++    scored = [x for x in scored if x[0] and x[0] > 0]
++    scored.sort(reverse=True, key=lambda x: x[0])
++    return scored[0][1] if scored else None
++
+ def main():
+     parser = argparse.ArgumentParser()
+     parser.add_argument("--cutoff", type=int, default=20)
++    parser.add_argument("--predictions", type=str, default=None,
++                        help="Path to predictions_long.parquet (override auto-detect).")
+     args = parser.parse_args()
+
+     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+@@ -25,18 +40,45 @@ def main():
+-    # Auto-detect predictions
+-    pred_candidates = glob.glob(os.path.join(project_root, "**", "predictions_long.parquet"), recursive=True)
+-    pred_path = pred_candidates[0] if pred_candidates else None
++    # Auto-detect predictions (prefer the biggest file; avoid tiny debug artifacts)
++    pred_candidates = glob.glob(os.path.join(project_root, "**", "predictions_long.parquet"), recursive=True)
++    # Optional: deprioritize outputs/ or very small debug folders if needed
++    pred_candidates = [p for p in pred_candidates if "outputs/" not in p]
++
++    if args.predictions:
++        pred_path = os.path.join(project_root, args.predictions) if not os.path.isabs(args.predictions) else args.predictions
++    else:
++        pred_path = pick_best_predictions(pred_candidates)
++
+     if not pred_path or not os.path.exists(pred_path):
+         raise FileNotFoundError("predictions_long.parquet not found. Use --predictions to specify path.")
+
+-    print(f"📂 Auto-detected predictions: {pred_path}")
++    print(f"📂 Predictions selected: {pred_path}")
++    if pred_candidates:
++        # print top 3 candidates for transparency
++        scored = []
++        for p in pred_candidates:
++            scored.append((_parquet_num_rows(p), p))
++        scored.sort(reverse=True, key=lambda x: x[0])
++        print("   Top candidates:")
++        for n, p in scored[:3]:
++            print(f"   - rows={n:>6}  {p}")
+
+     # Load QC catalog
+     qc_path = os.path.join(project_root, "outputs", "qc", "master_catalog.parquet")
+     qc = pd.read_parquet(qc_path)
+
+     # Load predictions
+     pred = pd.read_parquet(pred_path)
+
++    # Normalize / build well_uid for merge
++    # Your project convention: predictions['well_id'] is usually already well_uid like '1-13__SB1___B03'
++    if "well_uid" not in pred.columns:
++        if "well_id" in pred.columns:
++            pred["well_uid"] = pred["well_id"].astype(str)
++        else:
++            raise KeyError("predictions must contain well_id or well_uid")
++
++    # If well_uid doesn't contain '__' (e.g. A01), try composing from run_id + well_id
++    sample_uid = str(pred["well_uid"].iloc[0]) if len(pred) else ""
++    if "__" not in sample_uid:
++        if "run_id" in pred.columns and "well_id" in pred.columns:
++            pred["well_uid"] = pred["run_id"].astype(str) + "__" + pred["well_id"].astype(str)
++
++    # Filter cutoff if exists
+     if "cutoff" in pred.columns:
+         pred = pred[pred["cutoff"] == args.cutoff].copy()
+
+     print(f"🔄 Loading predictions...")
+     print(f"   Loaded {len(pred)} rows")
+-    print(f"   Sample pred well_uid: {pred['well_uid'].head(3).tolist()}")
++    if len(pred):
++        print(f"   Sample pred well_uid: {pred['well_uid'].head(3).tolist()}")
++    else:
++        print("   (no rows after cutoff filter)")
+
+     # Merge on well_uid
+     print("🔄 Merging QC catalog with predictions on well_uid...")
+     merged = qc.merge(pred, on="well_uid", how="inner")
+     print(f"   Merged: {len(merged)} rows")
++
++    # If merge failed, print useful diagnostics
++    if len(merged) == 0:
++        print("\n❌ No matching wells found!")
++        print("🔍 Debugging info:")
++        print("   QC well_uid sample:", qc["well_uid"].head(5).tolist() if "well_uid" in qc.columns else "(missing)")
++        print("   Pred well_uid sample:", pred["well_uid"].head(5).tolist() if "well_uid" in pred.columns else "(missing)")
++        print("   QC unique well_uid:", qc["well_uid"].nunique() if "well_uid" in qc.columns else -1)
++        print("   Pred unique well_uid:", pred["well_uid"].nunique() if "well_uid" in pred.columns else -1)
++        return
++
++    # (rest of your existing metric/bucket report generation continues unchanged)
++
+ if __name__ == "__main__":
+     main()

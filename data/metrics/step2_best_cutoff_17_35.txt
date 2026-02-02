@@ -1,0 +1,6 @@
+best_cutoff=30
+mae=0.682727523077529
+rmse=0.9392449879233884
+r2=0.9555395868999123
+fixed_set_curves=263
+fixed_set_runs=13
