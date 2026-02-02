@@ -1760,21 +1760,23 @@ if not cutoffs:
 
 # discover_cutoffs 아래, cutoff selectbox 전에 이 코드 넣기 (기존 사이드바 코드 삭제)
 
+# discover_cutoffs(MODELS_DIR) 후, cutoff selectbox 전에 이 코드로 교체
+
 with st.sidebar:
     st.title("CPHOTONICS | Early Ct Predictor")
     
-    # 최상단에만 큰 빨간 버튼 (항상 보임)
+    # 최상단에만 큰 빨간 버튼
     if st.button("📊 Data Quality Control & Catalog", type="primary", use_container_width=True):
         st.session_state.show_data_catalog = True
     
-    # 대시보드 들어갔을 때만 Back 버튼 보임
+    # 대시보드 모드일 때만 Back 버튼
     if st.session_state.get("show_data_catalog", False):
         if st.button("🔙 Back to Main", use_container_width=True):
             st.session_state.show_data_catalog = False
     
     st.divider()
     
-    # cutoff 등 기존 설정 (여기서부터 기존 코드 그대로)
+    # cutoff 등 기존 설정
     best = get_best_cutoff_from_report()
     default_cutoff = best if (best in cutoffs) else (30 if 30 in cutoffs else cutoffs[-1] if cutoffs else 20)
     cutoff = int(st.selectbox(
@@ -1783,9 +1785,8 @@ with st.sidebar:
         index=cutoffs.index(default_cutoff) if default_cutoff in cutoffs else 0,
         key="sidebar_cutoff",
     ))
-    # min_c, max_c 등 나머지 그대로
-    # ... min_c, max_c 등 나머지
-    # ... 나머지 기존 코드
+    
+    st.divider()
     st.subheader("재학습 (서버 데이터 기준)")
     min_c = st.number_input("min_cutoff", min_value=1, max_value=200, value=10, step=1, key="sidebar_min_c")
     max_c = st.number_input("max_cutoff", min_value=1, max_value=200, value=40, step=1, key="sidebar_max_c")
