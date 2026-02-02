@@ -17,8 +17,51 @@ import xgboost as xgb
 import pyarrow.dataset as ds
 import argparse
 
-# --- make sure PROJECT_ROOT is importable so "core" works even when launched from other dirs ---
+st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+CATALOG_PATH = Path("assets/data_catalog.json")
+
+st.subheader("Data Catalog")
+
+if CATALOG_PATH.exists():
+    with CATALOG_PATH.open("r", encoding="utf-8") as f:
+        catalog = json.load(f)
+    st.json(catalog)   # 일단은 이렇게라도 보이게
+else:
+    st.warning(f"Catalog not found: {CATALOG_PATH.resolve()}")
+
+def scan_data_files():
+    base = Path("data")
+    if not base.exists():
+        return set()
+    return {str(p).replace("\\", "/") for p in base.rglob("*") if p.is_file()}
+
+def load_catalog():
+    if CATALOG_PATH.exists():
+        return json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    return []
+
+available = scan_data_files()
+catalog = load_catalog()
+
+if not catalog:
+    st.warning("Catalog metadata not found. Add assets/data_catalog.json")
+else:
+    rows = []
+    for item in catalog:
+        path = item.get("path", "")
+        rows.append({
+            "id": item.get("id", ""),
+            "path": path,
+            "available_on_cloud": path in available,
+            "description": item.get("description", "")
+        })
+    st.dataframe(pd.DataFrame(rows), use_container_width=True)
+
+    st.caption("✔ available_on_cloud=False이면 Streamlit Cloud에는 파일이 없어서 미리보기/재학습이 제한됩니다.")
+
+# --- make sure PROJECT_ROOT is importable so "core" works even when launched from other dirs ---
+
 OPS_PATH = PROJECT_ROOT / "outputs" / "qc_performance_analysis" / "ops_decisions_cutoff_20.parquet"
 @st.cache_data
 def load_ops(path: Path) -> pd.DataFrame:
@@ -39,6 +82,10 @@ MODELS_DIR = PROJECT_ROOT / "data" / "models" / "by_cutoff"
 UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 
 st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
+st.write("DEBUG __file__:", __file__)
+st.write("DEBUG cwd:", os.getcwd())
+st.write("DEBUG catalog exists:", CATALOG_PATH.exists(), str(CATALOG_PATH.resolve()))
+st.write("DEBUG assets files:", [p.name for p in Path("assets").glob("*")])
 
 # -------------------------
 # Utilities

@@ -1,10 +1,7 @@
 [
   {
-    "id": "master_long",
-    "path": "data/canonical/master_long.parquet",
-    "description": "Canonical long-format qPCR curves",
-    "schema": ["sample_id", "cycle", "fluorescence", "ct"],
-    "source": "local build",
-    "notes": "Not shipped to Streamlit Cloud (large file)."
+    "id": "example",
+    "path": "data/example.csv",
+    "description": "example dataset"
   }
 ]
