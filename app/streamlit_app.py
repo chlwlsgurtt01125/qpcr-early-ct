@@ -254,9 +254,12 @@ def scan_data_files() -> set[str]:
 
 @st.cache_data(show_spinner=False)
 def load_catalog() -> list[dict]:
-    if CATALOG_PATH.exists():
-        return json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
-    return []
+    if not CATALOG_PATH.exists():
+        return []
+    data = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        return data.get("files", [])
+    return data if isinstance(data, list) else []
 
 available = scan_data_files()
 catalog = load_catalog()
