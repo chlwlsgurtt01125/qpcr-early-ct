@@ -169,66 +169,109 @@ if running_on_streamlit_cloud():
                 f"Ops decisions file for cutoff={cutoff} not found in data_catalog.json: {ops_filename}"
             )
 
-# ========== 수정된 코드 ==========
-# Data Catalog는 좌측 메뉴로만 표시하고, 메인에서는 숨김
-# (sidebar에서 클릭했을 때만 보이도록)
+# 기존 Data Catalog 표시 부분 (if st.session_state.show_data_catalog:) 전체를 아래로 교체
 
-# 좌측 사이드바에서 Data Catalog 클릭 여부 확인
-if 'show_data_catalog' not in st.session_state:
-    st.session_state.show_data_catalog = False
-
-# 좌측 메뉴에 Data Catalog 버튼 추가 (sidebar 섹션 안에)
-with st.sidebar:
-    st.divider()
-    if st.button("📊 Data Catalog", key="btn_data_catalog"):
-        st.session_state.show_data_catalog = True
-    
-    if st.button("🔙 Back to Main", key="btn_back_main"):
-        st.session_state.show_data_catalog = False
-
-# Data Catalog 표시 (클릭했을 때만)
 if st.session_state.show_data_catalog:
-    st.header("📊 Data Catalog")
-    
-    # 요약 데이터 로드
-    summary_path = PROJECT_ROOT / "outputs" / "catalog_summary.json"
-    
-    if summary_path.exists():
-        import json
-        with open(summary_path, 'r') as f:
-            summary = json.load(f)
-        
-        # 요약 통계 표시
-        col1, col2, col3, col4 = st.columns(4)
-        col1.metric("Total Wells", f"{summary.get('total_wells', 0):,}")
-        col2.metric("✅ PASS", f"{summary.get('pass_count', 0):,}")
-        col3.metric("❌ FAIL", f"{summary.get('fail_count', 0):,}")
-        col4.metric("⚠️ FLAG", f"{summary.get('flag_count', 0):,}")
-        
-        # QC Status 분포
-        if "qc_status_distribution" in summary:
-            st.subheader("QC Status Distribution")
-            status_df = pd.DataFrame(
-                list(summary["qc_status_distribution"].items()), 
-                columns=["Status", "Count"]
-            )
-            st.bar_chart(status_df.set_index("Status"))
-        
-        # Ct Bin 분포
-        if "ct_bin_distribution" in summary:
-            st.subheader("Ct Bin Distribution")
-            bin_df = pd.DataFrame(
-                list(summary["ct_bin_distribution"].items()), 
-                columns=["Ct Bin", "Count"]
-            )
-            st.bar_chart(bin_df.set_index("Ct Bin"))
-        
-        st.caption("💡 This is summary data. For full details, run on local server.")
-    
-    else:
-        st.warning("Summary data not found. Run: python scripts/generate_catalog_summary.py")
-    
-    st.stop()  # Data Catalog 표시 후 메인 앱 중지
+    st.header("📊 Data Quality Control & Catalog")
+
+    # 1. master_catalog 로드
+    @st.cache_data
+    def load_master_catalog():
+        path = QC_DIR / "master_catalog.parquet"
+        if path.exists():
+            return pd.read_parquet(path)
+        else:
+            st.error("master_catalog.parquet not found. Cloud에서는 자동 다운로드됩니다.")
+            return pd.DataFrame()
+
+    df = load_master_catalog()
+
+    if df.empty:
+        st.stop()
+
+    # 2. Summary Statistics
+    total = len(df)
+    pass_c = len(df[df["qc_status"] == "PASS"])
+    fail_c = len(df[df["qc_status"] == "FAIL"])
+    flag_c = len(df[df["qc_status"] == "FLAG"])
+    usable = pass_c
+    excluded = total - usable
+
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
+    col1.metric("Total Wells", total)
+    col2.metric("✅ PASS", pass_c, f"{pass_c/total*100:.1f}%")
+    col3.metric("❌ FAIL", fail_c, f"{fail_c/total*100:.1f}%")
+    col4.metric("⚠️ FLAG", flag_c, f"{flag_c/total*100:.1f}%")
+    col5.metric("🟢 Usable", usable, f"{usable/total*100:.1f}%")
+    col6.metric("🔴 Excluded", excluded, f"{excluded/total*100:.1f}%")
+
+    st.divider()
+
+    # 3. Visualizations
+    import plotly.express as px
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.subheader("QC Status Distribution")
+        fig_pie = px.pie(
+            df["qc_status"].value_counts().reset_index(),
+            values="count", names="qc_status",
+            color_discrete_map={"PASS": "green", "FAIL": "red", "FLAG": "orange"}
+        )
+        st.plotly_chart(fig_pie, use_container_width=True)
+
+    with col2:
+        st.subheader("Ct Bin Distribution")
+        fig_ct = px.bar(
+            df["ct_bin"].value_counts().sort_index().reset_index(),
+            x="ct_bin", y="count"
+        )
+        st.plotly_chart(fig_ct, use_container_width=True)
+
+    # Stacked bar
+    st.subheader("QC Status by Ct Bin")
+    stacked = df.groupby(["ct_bin", "qc_status"]).size().reset_index(name="count")
+    fig_stacked = px.bar(stacked, x="ct_bin", y="count", color="qc_status",
+                         color_discrete_map={"PASS": "green", "FAIL": "red", "FLAG": "orange"})
+    st.plotly_chart(fig_stacked, use_container_width=True)
+
+    # Exclusion Reasons
+    excluded_df = df[df["qc_status"] != "PASS"]
+    if not excluded_df.empty:
+        st.subheader("Top 10 Exclusion Reasons")
+        reasons = excluded_df["exclusion_reason"].value_counts().head(10).reset_index()
+        fig_ex = px.bar(reasons, x="count", y="exclusion_reason", orientation="h")
+        st.plotly_chart(fig_ex, use_container_width=True)
+
+    # 4. Filterable Table (AgGrid 설치 필요: pip install streamlit-aggrid)
+    st.subheader("📋 Master Catalog (Filterable)")
+    try:
+        from st_aggrid import AgGrid, GridOptionsBuilder
+        gb = GridOptionsBuilder.from_dataframe(df)
+        gb.configure_default_column(groupable=True, sortable=True, filterable=True)
+        grid = gb.build()
+        AgGrid(df, gridOptions=grid, height=500, fit_columns_on_grid_load=True)
+    except:
+        st.dataframe(df, use_container_width=True)
+
+    # 5. Download Buttons
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button("💾 Download Master Catalog (CSV)", df.to_csv(index=False), "master_catalog.csv")
+    with col2:
+        st.download_button("💾 Download Excluded Report (CSV)", excluded_df.to_csv(index=False), "excluded_report.csv")
+
+    # 6. 어두운 테마 (선택)
+    st.markdown("""
+    <style>
+        .css-1d391kg {background-color: #0e1117;}
+        .css-1y0t9cy {color: white;}
+        section[data-testid="stSidebar"] {background-color: #262730;}
+    </style>
+    """, unsafe_allow_html=True)
+
+    st.stop()
 
 ops = None
 try:
