@@ -1,0 +1,23 @@
+{
+  "generated_at": "2026-02-02T09:00:13.170107",
+  "total_wells": 275,
+  "pass_count": 163,
+  "fail_count": 105,
+  "flag_count": 7,
+  "usable_count": 163,
+  "qc_status_distribution": {
+    "PASS": 163,
+    "FAIL": 105,
+    "FLAG": 7
+  },
+  "ct_bin_distribution": {
+    "BIN_C": 233,
+    "BIN_D": 13,
+    "BIN_E": 13,
+    "BIN_OUT_OF_RANGE": 12,
+    "BIN_G": 1,
+    "BIN_UNKNOWN": 1,
+    "BIN_A": 1,
+    "BIN_F": 1
+  }
+}
