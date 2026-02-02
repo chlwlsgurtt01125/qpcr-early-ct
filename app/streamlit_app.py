@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 import urllib.request
 import urllib.error
-
+import plotly.express as px
 import numpy as np
 import pandas as pd
 import streamlit as st
@@ -21,6 +21,10 @@ import argparse
 
 # ✅ set_page_config는 반드시 1번만, 그리고 최상단에서
 st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
+
+# 기존 초기화 코드가 있으면 덮어쓰기
+if 'show_data_catalog' not in st.session_state:
+    st.session_state.show_data_catalog = False
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -147,7 +151,13 @@ if running_on_streamlit_cloud():
 
 # ✅ cutoff 먼저 정의
 cutoff = int(st.sidebar.selectbox("Cutoff", [10, 20, 24, 30, 40], index=1))
-
+with st.sidebar:
+    st.divider()
+    if st.button("📊 Data Catalog", key="btn_data_catalog"):
+        st.session_state.show_data_catalog = True
+    
+    if st.button("🔙 Back to Main", key="btn_back_main"):
+        st.session_state.show_data_catalog = False
 OPS_DIR = PROJECT_ROOT / "outputs" / "qc_performance_analysis"
 OPS_DIR.mkdir(parents=True, exist_ok=True)
 
