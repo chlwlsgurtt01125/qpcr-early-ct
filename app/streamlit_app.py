@@ -1765,18 +1765,18 @@ if not cutoffs:
 with st.sidebar:
     st.title("CPHOTONICS | Early Ct Predictor")
     
-    # 최상단에만 큰 빨간 버튼
+    # 최상단에만 빨간 버튼 (항상 보임)
     if st.button("📊 Data Quality Control & Catalog", type="primary", use_container_width=True):
         st.session_state.show_data_catalog = True
     
-    # 대시보드 모드일 때만 Back 버튼
+    # 대시보드 모드일 때만 Back 버튼 (중간에 안 생김)
     if st.session_state.get("show_data_catalog", False):
         if st.button("🔙 Back to Main", use_container_width=True):
             st.session_state.show_data_catalog = False
     
     st.divider()
     
-    # cutoff 등 기존 설정
+    # 기존 cutoff 등 (이 아래 그대로)
     best = get_best_cutoff_from_report()
     default_cutoff = best if (best in cutoffs) else (30 if 30 in cutoffs else cutoffs[-1] if cutoffs else 20)
     cutoff = int(st.selectbox(
