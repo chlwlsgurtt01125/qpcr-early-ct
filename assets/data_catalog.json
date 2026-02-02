@@ -1,7 +1,36 @@
-[
-  {
-    "id": "example",
-    "path": "data/example.csv",
-    "description": "example dataset"
-  }
-]
+{
+  "release_tag": "v0.1.0",
+  "base_url": "https://github.com/chlwlsgurtt01125/qpcr-early-ct/releases/download/v0.1.0",
+  "files": [
+    {
+      "id": "qc_master_catalog",
+      "filename": "master_catalog.parquet",
+      "url": "https://github.com/chlwlsgurtt01125/qpcr-early-ct/releases/download/v0.1.0/master_catalog.parquet",
+      "description": "QC catalog (master_catalog.parquet)"
+    },
+    {
+      "id": "metrics_by_cutoff",
+      "filename": "metrics_by_cutoff.parquet",
+      "url": "https://github.com/chlwlsgurtt01125/qpcr-early-ct/releases/download/v0.1.0/metrics_by_cutoff.parquet",
+      "description": "Model performance metrics by cutoff"
+    },
+    {
+      "id": "predictions_long",
+      "filename": "predictions_long.parquet",
+      "url": "https://github.com/chlwlsgurtt01125/qpcr-early-ct/releases/download/v0.1.0/predictions_long.parquet",
+      "description": "Long-format predictions for analysis"
+    },
+    {
+      "id": "ops_decisions_cutoff_20",
+      "filename": "ops_decisions_cutoff_20.parquet",
+      "url": "https://github.com/chlwlsgurtt01125/qpcr-early-ct/releases/download/v0.1.0/ops_decisions_cutoff_20.parquet",
+      "description": "Ops decisions parquet for cutoff=20"
+    },
+    {
+      "id": "ops_decisions_cutoff_24",
+      "filename": "ops_decisions_cutoff_24.parquet",
+      "url": "https://github.com/chlwlsgurtt01125/qpcr-early-ct/releases/download/v0.1.0/ops_decisions_cutoff_24.parquet",
+      "description": "Ops decisions parquet for cutoff=24"
+    }
+  ]
+}
