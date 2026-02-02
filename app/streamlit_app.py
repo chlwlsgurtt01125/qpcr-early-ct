@@ -237,49 +237,61 @@ if st.session_state.show_data_catalog:
     st.divider()
 
     # 3. Visualizations
-    import plotly.express as px
-
+        # 3. Visualizations
     col1, col2 = st.columns(2)
+
     with col1:
-    st.subheader("QC Status Distribution")
-    status_counts = df["qc_status"].value_counts()
-    if not status_counts.empty:
-        fig_pie = px.pie(
-            status_counts.reset_index(),
-            values="count", names="qc_status",
-            color_discrete_map={"PASS": "#00FF00", "FAIL": "#FF0000", "FLAG": "#FFA500", "UNKNOWN": "#808080"}
-        )
-        st.plotly_chart(fig_pie, use_container_width=True)
-    else:
-        st.info("QC Status 데이터 없음")
+        st.subheader("QC Status Distribution")
+        status_counts = df["qc_status"].value_counts()
+        if not status_counts.empty:
+            fig_pie = px.pie(
+                status_counts.reset_index(),
+                values="count", names="qc_status",
+                color_discrete_map={"PASS": "#00FF00", "FAIL": "#FF0000", "FLAG": "#FFA500", "UNKNOWN": "#808080"}
+            )
+            fig_pie.update_layout(showlegend=True)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.info("QC Status 데이터가 없습니다.")
 
     with col2:
         st.subheader("Ct Bin Distribution")
         ct_order = sorted(df["ct_bin"].dropna().unique())
-        fig_ct = px.bar(
-            df["ct_bin"].value_counts().reindex(ct_order).reset_index(),
-            x="ct_bin", y="count", title="Ct Bin Distribution"
-        )
-        st.plotly_chart(fig_ct, use_container_width=True)
+        if not ct_order:
+            st.info("Ct Bin 데이터가 없습니다.")
+        else:
+            fig_ct = px.bar(
+                df["ct_bin"].value_counts().reindex(ct_order).reset_index(),
+                x="ct_bin", y="count"
+            )
+            st.plotly_chart(fig_ct, use_container_width=True)
 
     st.subheader("QC Status by Ct Bin")
     stacked = df.groupby(["ct_bin", "qc_status"]).size().reset_index(name="count")
-    stacked = stacked.sort_values("ct_bin")
-    fig_stacked = px.bar(
-        stacked, x="ct_bin", y="count", color="qc_status",
-        color_discrete_map={"PASS": "#00FF00", "FAIL": "#FF0000", "FLAG": "#FFA500"},
-        title="QC Status by Ct Bin"
-    )
-    st.plotly_chart(fig_stacked, use_container_width=True)
+    if not stacked.empty:
+        stacked = stacked.sort_values("ct_bin")
+        fig_stacked = px.bar(
+            stacked, x="ct_bin", y="count", color="qc_status",
+            color_discrete_map={"PASS": "#00FF00", "FAIL": "#FF0000", "FLAG": "#FFA500"},
+            title="QC Status by Ct Bin"
+        )
+        st.plotly_chart(fig_stacked, use_container_width=True)
+    else:
+        st.info("QC Status by Ct Bin 데이터가 없습니다.")
 
     excluded_df = df[df["qc_status"] != "PASS"]
     if not excluded_df.empty:
         st.subheader("🔍 Exclusion Analysis - Top 10 Reasons")
         reasons = excluded_df["exclusion_reason"].value_counts().head(10).reset_index()
-        fig_ex = px.bar(reasons, x="count", y="exclusion_reason", orientation="h",
-                        title="Top 10 Exclusion Reasons")
-        fig_ex.update_layout(height=500)
-        st.plotly_chart(fig_ex, use_container_width=True)
+        if not reasons.empty and reasons["count"].sum() > 0:
+            fig_ex = px.bar(reasons, x="count", y="exclusion_reason", orientation="h",
+                            title="Top 10 Exclusion Reasons")
+            fig_ex.update_layout(height=500)
+            st.plotly_chart(fig_ex, use_container_width=True)
+        else:
+            st.info("Excluded 샘플이 없거나 exclusion_reason이 모두 비어있습니다.")
+    else:
+        st.info("Excluded 샘플이 없습니다.")
 
     # 4. Filterable Table
     st.subheader("📋 Master Catalog (Filterable & Sortable)")
@@ -1741,14 +1753,12 @@ cutoffs = discover_cutoffs(MODELS_DIR)
 if not cutoffs:
     st.error(f"모델을 찾지 못했어: {MODELS_DIR} (ct_xgb_cutoff_*.json 없음)")
     st.stop()
-
 with st.sidebar:
-    st.header("Navigation")
-    if st.button("📊 Data Quality Control & Catalog", key="btn_data_catalog_main"):
+    st.title("CPHOTONICS | Early Ct Predictor")  # 앱 제목 사이드바에
+    if st.button("📊 Data Quality Control & Catalog", type="primary"):
         st.session_state.show_data_catalog = True
-    if st.button("🔙 Back to Main", key="btn_back_main"):
-        st.session_state.show_data_catalog = False
-    
+    if st.button("🔙 Back to Main"):
+        st.session_state.show_data_catalog = False    
     st.divider()
     st.subheader("재학습 (서버 데이터 기준)")
     min_c = st.number_input("min_cutoff", min_value=1, max_value=200, value=10, step=1, key="sidebar_min_c")
