@@ -28,3 +28,4 @@ app/data/reports/
 !data/models/by_cutoff/*.json
 !data/models/by_cutoff/*.meta.json
 pages/
+pages/
