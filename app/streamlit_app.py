@@ -353,22 +353,6 @@ except Exception as e:
     st.error(f"Failed to load ops decisions: {e}")
     st.caption(f"Checked: {parquet_path} , {csv_path}")
 
-if not CATALOG_PATH.exists():
-    st.warning(f"Catalog not found: {CATALOG_PATH}")
-elif not catalog:
-    st.warning("Catalog metadata is empty. Check assets/data_catalog.json")
-else:
-    rows = []
-    for item in catalog:
-        path = item.get("path", "")
-        rows.append({
-            "id": item.get("id", ""),
-            "path": path,
-            "available_on_cloud": path in available,
-            "description": item.get("description", "")
-        })
-    st.dataframe(pd.DataFrame(rows), use_container_width=True)
-
 # ✅ 중복 decision_from_qc 함수 제거 (하나만 유지)
 def decision_from_qc(qc_status: str) -> str:
     """QC 상태를 기반으로 운영 결정"""
