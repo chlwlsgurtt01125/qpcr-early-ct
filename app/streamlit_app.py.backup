@@ -346,12 +346,32 @@ try:
         ops = pd.read_parquet(parquet_path)
     elif csv_path.exists():
         ops = pd.read_csv(csv_path, encoding="utf-8")
-    
+        st.success(f"Loaded ops decisions (csv): {csv_path.name}")
     else:
         st.warning(f"Ops decisions not found: {parquet_path} (or {csv_path})")
 except Exception as e:
     st.error(f"Failed to load ops decisions: {e}")
     st.caption(f"Checked: {parquet_path} , {csv_path}")
+
+@st.cache_data(show_spinner=False)
+def scan_data_files() -> set[str]:
+    base = PROJECT_ROOT / "data"   # <- 상대경로 말고 PROJECT_ROOT 기준 추천
+    if not base.exists():
+        return set()
+    return {str(p.relative_to(PROJECT_ROOT)).replace("\\", "/")
+            for p in base.rglob("*") if p.is_file()}
+
+@st.cache_data(show_spinner=False)
+def load_catalog() -> list[dict]:
+    if not CATALOG_PATH.exists():
+        return []
+    data = json.loads(CATALOG_PATH.read_text(encoding="utf-8"))
+    if isinstance(data, dict):
+        return data.get("files", [])
+    return data if isinstance(data, list) else []
+
+available = scan_data_files()
+catalog = load_catalog()
 
 if not CATALOG_PATH.exists():
     st.warning(f"Catalog not found: {CATALOG_PATH}")
@@ -411,7 +431,10 @@ def running_on_streamlit_cloud() -> bool:
 
 can_retrain = has_canonical_master_long() and (not running_on_streamlit_cloud())
 if running_on_streamlit_cloud():
-    
+    st.warning(
+        "Streamlit Cloud에는 학습 데이터(data/canonical/master_long.parquet)가 없어서 재학습을 실행할 수 없어요.\n"
+        "서버/로컬에서 학습을 돌려 reports/ 결과물을 저장(또는 커밋)한 뒤 Cloud에서는 그 결과를 보여주는 방식으로 운영하세요."
+    )
 elif not has_canonical_master_long():
     st.warning("학습 데이터 master_long.parquet가 없어서 재학습을 실행할 수 없어요.")
 
@@ -1768,286 +1791,47 @@ tabs = st.tabs(["📈 Performance", "📊 Data Catalog", "🧪 Predict (Upload)"
 with tabs[0]:
     show_train_report()
 
-# ============================================
-# Data Catalog 탭 - 완전히 새로운 버전
-# streamlit_app.py의 tabs[1] 부분에 넣을 코드
-# ============================================
-
-with tabs[1]:  # Data Catalog 탭
+with tabs[1]:  # ✅ 새로 추가: Data Catalog
     st.header("📊 Data Quality Control & Catalog")
-    st.markdown("QC 분석 결과를 시각화하고 다운로드할 수 있습니다.")
     
-    # ========================================
-    # 1. QC Catalog 로드
-    # ========================================
     @st.cache_data
-    def load_qc_catalog():
-        qc_path = QC_DIR / "master_catalog.parquet"
-        if qc_path.exists():
-            return pd.read_parquet(qc_path)
-        return pd.DataFrame()
-    
-    qc_df = load_qc_catalog()
-    
-    if qc_df.empty:
-        st.warning("⚠️ QC catalog not found")
-        st.info("""
-        **QC 데이터를 생성하려면:**
-        
-        서버에서 실행:
-        ```bash
-        cd ~/qpcr_v2
-        python scripts/save_qc_results.py
-        ```
-        """)
-        st.stop()
-    
-    # ========================================
-    # 2. 전체 요약 통계 (상단 카드)
-    # ========================================
-    total = len(qc_df)
-    pass_c = (qc_df['qc_status'] == 'PASS').sum()
-    fail_c = (qc_df['qc_status'] == 'FAIL').sum()
-    flag_c = (qc_df['qc_status'] == 'FLAG').sum()
-    usable = qc_df['usable'].sum() if 'usable' in qc_df.columns else pass_c
-    
-    st.subheader("📈 전체 요약")
-    col1, col2, col3, col4, col5 = st.columns(5)
-    col1.metric("Total Wells", f"{total:,}")
-    col2.metric("✅ PASS", f"{pass_c:,}", f"{pass_c/total*100:.1f}%")
-    col3.metric("❌ FAIL", f"{fail_c:,}", f"{fail_c/total*100:.1f}%")
-    col4.metric("⚠️ FLAG", f"{flag_c:,}", f"{flag_c/total*100:.1f}%")
-    col5.metric("🟢 Usable", f"{usable:,}", f"{usable/total*100:.1f}%")
-    
-    st.divider()
-    
-    # ========================================
-    # 3. 시각화 (2열)
-    # ========================================
-    st.subheader("📊 QC 분포 시각화")
-    
-    viz_col1, viz_col2 = st.columns(2)
-    
-    with viz_col1:
-        st.markdown("#### QC Status Distribution")
-        status_counts = qc_df['qc_status'].value_counts()
-        
-        import plotly.express as px
-        fig_pie = px.pie(
-            values=status_counts.values,
-            names=status_counts.index,
-            color=status_counts.index,
-            color_discrete_map={
-                'PASS': '#00CC66',
-                'FAIL': '#FF4444', 
-                'FLAG': '#FFAA00'
-            },
-            hole=0.4
-        )
-        fig_pie.update_traces(textposition='inside', textinfo='percent+label')
-        fig_pie.update_layout(showlegend=True, height=350)
-        st.plotly_chart(fig_pie, use_container_width=True)
-    
-    with viz_col2:
-        st.markdown("#### Ct Bin Distribution")
-        if 'ct_bin' in qc_df.columns:
-            ct_counts = qc_df['ct_bin'].value_counts().sort_index()
-            fig_bar = px.bar(
-                x=ct_counts.index,
-                y=ct_counts.values,
-                labels={'x': 'Ct Bin', 'y': 'Count'},
-                color=ct_counts.values,
-                color_continuous_scale='Viridis'
-            )
-            fig_bar.update_layout(showlegend=False, height=350)
-            st.plotly_chart(fig_bar, use_container_width=True)
+    def load_master_catalog():
+        path = QC_DIR / "master_catalog.parquet"
+        if path.exists():
+            return pd.read_parquet(path)
         else:
-            st.info("ct_bin 컬럼이 없습니다.")
+            st.warning("QC catalog not found. Run: python scripts/save_qc_results.py")
+            return pd.DataFrame()
     
-    # ========================================
-    # 4. Fail Reason 분석 (Top 10)
-    # ========================================
-    if 'fail_reason' in qc_df.columns:
-        st.subheader("🔍 Fail Reason Analysis (Top 10)")
+    df = load_master_catalog()
+    
+    if df.empty:
+        st.info("QC 데이터가 없습니다.")
+    else:
+        # 요약 통계
+        total = len(df)
+        pass_c = len(df[df["qc_status"] == "PASS"])
+        fail_c = len(df[df["qc_status"] == "FAIL"])
+        flag_c = len(df[df["qc_status"] == "FLAG"])
         
-        fail_df = qc_df[qc_df['qc_status'] != 'PASS'].copy()
-        if not fail_df.empty:
-            fail_counts = fail_df['fail_reason'].value_counts().head(10)
-            
-            fig_fail = px.bar(
-                x=fail_counts.values,
-                y=fail_counts.index,
-                orientation='h',
-                labels={'x': 'Count', 'y': 'Fail Reason'},
-                color=fail_counts.values,
-                color_continuous_scale='Reds'
-            )
-            fig_fail.update_layout(showlegend=False, height=400)
-            st.plotly_chart(fig_fail, use_container_width=True)
-        else:
-            st.success("🎉 No failed samples!")
-    
-    st.divider()
-    
-    # ========================================
-    # 5. QC Metrics 분포 (r2, snr)
-    # ========================================
-    if 'r2' in qc_df.columns and 'snr' in qc_df.columns:
-        st.subheader("📐 QC Metrics Distribution")
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total", f"{total:,}")
+        col2.metric("✅ PASS", f"{pass_c:,}")
+        col3.metric("❌ FAIL", f"{fail_c:,}")
+        col4.metric("⚠️ FLAG", f"{flag_c:,}")
         
-        metric_col1, metric_col2 = st.columns(2)
+        st.divider()
         
-        with metric_col1:
-            fig_r2 = px.histogram(
-                qc_df,
-                x='r2',
-                nbins=50,
-                labels={'r2': 'R² Value'},
-                title='R² Distribution',
-                color_discrete_sequence=['#3498db']
-            )
-            fig_r2.add_vline(x=0.98, line_dash="dash", line_color="red", 
-                            annotation_text="Threshold (0.98)")
-            st.plotly_chart(fig_r2, use_container_width=True)
+        # 테이블
+        st.dataframe(df, use_container_width=True, height=400)
         
-        with metric_col2:
-            fig_snr = px.histogram(
-                qc_df,
-                x='snr',
-                nbins=50,
-                labels={'snr': 'SNR Value'},
-                title='SNR Distribution',
-                color_discrete_sequence=['#e74c3c']
-            )
-            st.plotly_chart(fig_snr, use_container_width=True)
-    
-    st.divider()
-    
-    # ========================================
-    # 6. 필터링 가능한 테이블
-    # ========================================
-    st.subheader("🔎 Detailed Data Table (Filterable)")
-    
-    # 필터 옵션
-    filter_col1, filter_col2, filter_col3 = st.columns(3)
-    
-    with filter_col1:
-        status_filter = st.multiselect(
-            "QC Status",
-            options=['PASS', 'FAIL', 'FLAG'],
-            default=['PASS', 'FAIL', 'FLAG']
-        )
-    
-    with filter_col2:
-        if 'ct_bin' in qc_df.columns:
-            ct_bins = sorted(qc_df['ct_bin'].dropna().unique())
-            ct_filter = st.multiselect(
-                "Ct Bin",
-                options=ct_bins,
-                default=ct_bins
-            )
-        else:
-            ct_filter = None
-    
-    with filter_col3:
-        search_well = st.text_input("Search Well ID", "")
-    
-    # 필터 적용
-    filtered = qc_df[qc_df['qc_status'].isin(status_filter)].copy()
-    
-    if ct_filter and 'ct_bin' in qc_df.columns:
-        filtered = filtered[filtered['ct_bin'].isin(ct_filter)]
-    
-    if search_well:
-        if 'well_uid' in filtered.columns:
-            filtered = filtered[filtered['well_uid'].str.contains(search_well, case=False, na=False)]
-        elif 'Well' in filtered.columns:
-            filtered = filtered[filtered['Well'].str.contains(search_well, case=False, na=False)]
-    
-    st.write(f"Showing **{len(filtered):,}** / **{total:,}** wells")
-    
-    # 표시할 컬럼 선택
-    display_cols = ['well_uid', 'run_id', 'Well', 'ct_value', 'ct_bin', 
-                   'qc_status', 'fail_reason', 'usable', 'r2', 'snr']
-    available_cols = [c for c in display_cols if c in filtered.columns]
-    
-    # 테이블 표시
-    st.dataframe(
-        filtered[available_cols],
-        use_container_width=True,
-        height=500
-    )
-    
-    # ========================================
-    # 7. 다운로드 버튼
-    # ========================================
-    st.subheader("💾 Download Data")
-    
-    download_col1, download_col2 = st.columns(2)
-    
-    with download_col1:
-        # 전체 데이터 다운로드
-        csv_all = qc_df.to_csv(index=False).encode('utf-8')
+        # 다운로드
+        csv = df.to_csv(index=False).encode('utf-8')
         st.download_button(
-<<<<<<< HEAD
             "📥 Download CSV",
             csv,
             "qc_catalog.csv",
-            "text/csv")
-=======
-            label="📥 Download All Data (CSV)",
-            data=csv_all,
-            file_name=f"qc_catalog_all_{cutoff}.csv",
-            mime="text/csv"
-        )
-    
-    with download_col2:
-        # 필터된 데이터 다운로드
-        csv_filtered = filtered.to_csv(index=False).encode('utf-8')
-        st.download_button(
-            label="📥 Download Filtered Data (CSV)",
-            data=csv_filtered,
-            file_name=f"qc_catalog_filtered_{cutoff}.csv",
-            mime="text/csv"
-        )
-    
-    # ========================================
-    # 8. 상세 통계 (접기/펼치기)
-    # ========================================
-    with st.expander("📊 상세 통계 보기", expanded=False):
-        stat_col1, stat_col2, stat_col3 = st.columns(3)
-        
-        with stat_col1:
-            st.markdown("**Ct Value 통계**")
-            if 'ct_value' in qc_df.columns:
-                st.write({
-                    "Mean": f"{qc_df['ct_value'].mean():.2f}",
-                    "Median": f"{qc_df['ct_value'].median():.2f}",
-                    "Std": f"{qc_df['ct_value'].std():.2f}",
-                    "Min": f"{qc_df['ct_value'].min():.2f}",
-                    "Max": f"{qc_df['ct_value'].max():.2f}"
-                })
-        
-        with stat_col2:
-            st.markdown("**R² 통계**")
-            if 'r2' in qc_df.columns:
-                st.write({
-                    "Mean": f"{qc_df['r2'].mean():.4f}",
-                    "Median": f"{qc_df['r2'].median():.4f}",
-                    "Min": f"{qc_df['r2'].min():.4f}",
-                    "< 0.98": f"{(qc_df['r2'] < 0.98).sum()} wells"
-                })
-        
-        with stat_col3:
-            st.markdown("**SNR 통계**")
-            if 'snr' in qc_df.columns:
-                st.write({
-                    "Mean": f"{qc_df['snr'].mean():.2f}",
-                    "Median": f"{qc_df['snr'].median():.2f}",
-                    "Min": f"{qc_df['snr'].min():.2f}",
-                    "Max": f"{qc_df['snr'].max():.2f}"
-                })
->>>>>>> 337e78d (UI cleanup and Data Catalog enhancement)
+            "text/csv"
             
 with tabs[2]:
     st.subheader("🧪 Predict (Upload)")
