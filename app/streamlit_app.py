@@ -411,10 +411,9 @@ def running_on_streamlit_cloud() -> bool:
 
 can_retrain = has_canonical_master_long() and (not running_on_streamlit_cloud())
 if running_on_streamlit_cloud():
-    
+    pass
 elif not has_canonical_master_long():
-    st.warning("학습 데이터 master_long.parquet가 없어서 재학습을 실행할 수 없어요.")
-
+    pass
 
 def get_active_model_id() -> str:
     p = REPORTS_ROOT / "active_model.txt"
@@ -1989,12 +1988,6 @@ with tabs[1]:  # Data Catalog 탭
         # 전체 데이터 다운로드
         csv_all = qc_df.to_csv(index=False).encode('utf-8')
         st.download_button(
-<<<<<<< HEAD
-            "📥 Download CSV",
-            csv,
-            "qc_catalog.csv",
-            "text/csv")
-=======
             label="📥 Download All Data (CSV)",
             data=csv_all,
             file_name=f"qc_catalog_all_{cutoff}.csv",
@@ -2047,7 +2040,6 @@ with tabs[1]:  # Data Catalog 탭
                     "Min": f"{qc_df['snr'].min():.2f}",
                     "Max": f"{qc_df['snr'].max():.2f}"
                 })
->>>>>>> 337e78d (UI cleanup and Data Catalog enhancement)
             
 with tabs[2]:
     st.subheader("🧪 Predict (Upload)")
