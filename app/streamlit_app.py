@@ -1831,7 +1831,7 @@ with tabs[1]:  # ✅ 새로 추가: Data Catalog
             "📥 Download CSV",
             csv,
             "qc_catalog.csv",
-            "text/csv"
+            "text/csv")
             
 with tabs[2]:
     st.subheader("🧪 Predict (Upload)")
