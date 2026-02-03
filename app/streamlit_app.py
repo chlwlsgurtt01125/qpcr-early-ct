@@ -344,7 +344,6 @@ ops = None
 try:
     if parquet_path.exists():
         ops = pd.read_parquet(parquet_path)
-        st.success(f"Loaded ops decisions (parquet): {parquet_path.name}")
     elif csv_path.exists():
         ops = pd.read_csv(csv_path, encoding="utf-8")
         st.success(f"Loaded ops decisions (csv): {csv_path.name}")
@@ -1762,18 +1761,9 @@ if not cutoffs:
 
 # discover_cutoffs(MODELS_DIR) 후, cutoff selectbox 전에 이 코드로 교체
 
+# 수정된 코드 (버튼 부분만 삭제):
 with st.sidebar:
     st.title("CPHOTONICS | Early Ct Predictor")
-    
-    # 최상단에만 빨간 버튼 (항상 보임)
-    if st.button("📊 Data Quality Control & Catalog", type="primary", use_container_width=True):
-        st.session_state.show_data_catalog = True
-    
-    # 대시보드 모드일 때만 Back 버튼 (중간에 안 생김)
-    if st.session_state.get("show_data_catalog", False):
-        if st.button("🔙 Back to Main", use_container_width=True):
-            st.session_state.show_data_catalog = False
-    
     st.divider()
     
     # 기존 cutoff 등 (이 아래 그대로)
@@ -1795,12 +1785,55 @@ cutoff = int(cutoff)
 min_c = int(min_c)
 max_c = int(max_c)
 
-tabs = st.tabs(["📈 Performance", "🧪 Predict (Upload)", "🧨 Hard Review", "🛠 Retrain(Admin)"])
+# 수정된 코드:
+tabs = st.tabs(["📈 Performance", "📊 Data Catalog", "🧪 Predict (Upload)", "🧨 Hard Review", "🛠 Retrain(Admin)"])
 
 with tabs[0]:
-    show_train_report()   # 최소한 이거라도
+    show_train_report()
 
-with tabs[1]:
+with tabs[1]:  # ✅ 새로 추가: Data Catalog
+    st.header("📊 Data Quality Control & Catalog")
+    
+    @st.cache_data
+    def load_master_catalog():
+        path = QC_DIR / "master_catalog.parquet"
+        if path.exists():
+            return pd.read_parquet(path)
+        else:
+            st.warning("QC catalog not found. Run: python scripts/save_qc_results.py")
+            return pd.DataFrame()
+    
+    df = load_master_catalog()
+    
+    if df.empty:
+        st.info("QC 데이터가 없습니다.")
+    else:
+        # 요약 통계
+        total = len(df)
+        pass_c = len(df[df["qc_status"] == "PASS"])
+        fail_c = len(df[df["qc_status"] == "FAIL"])
+        flag_c = len(df[df["qc_status"] == "FLAG"])
+        
+        col1, col2, col3, col4 = st.columns(4)
+        col1.metric("Total", f"{total:,}")
+        col2.metric("✅ PASS", f"{pass_c:,}")
+        col3.metric("❌ FAIL", f"{fail_c:,}")
+        col4.metric("⚠️ FLAG", f"{flag_c:,}")
+        
+        st.divider()
+        
+        # 테이블
+        st.dataframe(df, use_container_width=True, height=400)
+        
+        # 다운로드
+        csv = df.to_csv(index=False).encode('utf-8')
+        st.download_button(
+            "📥 Download CSV",
+            csv,
+            "qc_catalog.csv",
+            "text/csv"
+            
+with tabs[2]:
     st.subheader("🧪 Predict (Upload)")
     up = st.file_uploader("qPCR 파일 업로드 (csv/xlsx)", type=["csv", "xlsx", "xls"])
     if up is None:
@@ -2382,13 +2415,13 @@ with tabs[1]:
 # -------------------------
 # Tab 2: Hard Review
 # -------------------------
-with tabs[2]:
+with tabs[3]:
     show_hard_review()
 
 # -------------------------
 # Tab 3: Retrain (Admin)
 # -------------------------
-with tabs[3]:
+with tabs[4]:
     st.subheader("2) 누적 반영 후 재학습 (관리자 버튼)")
 
     if running_on_streamlit_cloud():
