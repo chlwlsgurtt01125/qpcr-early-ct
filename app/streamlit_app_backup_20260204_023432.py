@@ -22,7 +22,6 @@ from scipy.optimize import curve_fit
 from scipy.stats import linregress
 from dataclasses import dataclass
 from enum import Enum
-from typing import Dict, Tuple, Optional, List
 
 class HardBucket(Enum):
     """Hard Sample 버킷 종류"""
@@ -103,49 +102,40 @@ def fit_sigmoid(cycles: np.ndarray, fluor: np.ndarray) -> Tuple[float, np.ndarra
     except Exception as e:
         return 0.0, np.zeros_like(fluor), {"error": str(e)}
 
-def build_x_from_long(df_long: pd.DataFrame, cutoff: int) -> Tuple[np.ndarray, pd.DataFrame]:
-    """Build feature matrix X from long-format DataFrame."""
-    df = df_long[df_long["Cycle"] <= cutoff].copy()
-    
-    index_cols = ["run_id", "Well"]
-    if "well_uid" in df.columns:
-        index_cols.append("well_uid")
-    
-    pivot = df.pivot_table(
-        index=index_cols,
-        columns="Cycle",
-        values="Fluor",
-        aggfunc="first"
-    ).reset_index()
-    
-    feat_cols = [c for c in pivot.columns if isinstance(c, (int, float)) or (isinstance(c, str) and c.isdigit())]
-    feat_cols = sorted(feat_cols, key=lambda x: int(x) if isinstance(x, str) else x)
-    
-    meta = pivot[["run_id", "Well"]].copy()
-    if "well_uid" in pivot.columns:
-        meta["well_uid"] = pivot["well_uid"]
-    
-    X = pivot[feat_cols].values.astype(float)
-    X = pd.DataFrame(X).ffill(axis=1).bfill(axis=1).values
-    
-    return X, meta
+def sigmoid_4pl(x, a, b, c, d):
+    """4-Parameter Logistic Sigmoid"""
+    return d + (a - d) / (1 + (x / c) ** b)
 
-# Ct 컬럼 찾기 (더 유연하게: 'ct' 포함된 컬럼 우선, 대소문자 무시)
-    ct_cols = [c for c in df_long.columns if 'ct' in c.lower() and ('value' in c.lower() or 'true' in c.lower())]
-    if not ct_cols:
-        raise ValueError("Cannot find Ct column (searched for 'ct' in column names)")
-    ct_col = ct_cols[0]  # 첫 번째 찾은 거 사용 (필요시 print로 확인)
-    print(f"Using Ct column: {ct_col}")  # 디버그용
 
-    # true_ct 추출
-    true_ct = df_long.groupby("well_uid")[ct_col].first().reset_index()
-    true_ct.rename(columns={ct_col: "true_ct"}, inplace=True)
-
-    # ... 나머지 feature 코드 (early_fluor 등) ...
-
-    # X와 meta merge
-    out = meta.merge(true_ct, on="well_uid", how="left")
-    return out
+def fit_sigmoid(cycles: np.ndarray, fluor: np.ndarray) -> Tuple[float, np.ndarray, Dict]:
+    """
+    Sigmoid fitting 수행
+    Returns: (r2, fitted_values, params_dict)
+    """
+    try:
+        a_init = np.min(fluor)
+        d_init = np.max(fluor)
+        c_init = cycles[len(cycles) // 2]
+        b_init = 1.0
+        
+        popt, _ = curve_fit(
+            sigmoid_4pl, cycles, fluor,
+            p0=[a_init, b_init, c_init, d_init],
+            bounds=([0, 0.1, 1, 0], [np.inf, 50, 100, np.inf]),
+            maxfev=5000
+        )
+        
+        fitted = sigmoid_4pl(cycles, *popt)
+        params = {"a": popt[0], "b": popt[1], "c": popt[2], "d": popt[3]}
+        
+        ss_res = np.sum((fluor - fitted) ** 2)
+        ss_tot = np.sum((fluor - np.mean(fluor)) ** 2)
+        r2 = 1 - (ss_res / ss_tot) if ss_tot > 0 else 0.0
+        
+        return r2, fitted, params
+        
+    except Exception as e:
+        return 0.0, np.zeros_like(fluor), {"error": str(e)}
 
 # ✅ set_page_config는 반드시 1번만, 그리고 최상단에서
 st.set_page_config(page_title="CPHOTONICS | Early Ct Predictor", layout="wide")
@@ -163,6 +153,12 @@ UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 # ========================================
 # GitHub Release에서 QC 데이터 자동 다운로드
 # ========================================
+def load_data_catalog(catalog_path):
+    try:
+        with open(catalog_path, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 def load_data_catalog(path: Path) -> dict:
     try:
@@ -932,257 +928,6 @@ def show_hard_review_with_buckets() -> None:
 # -------------------------
 # Utilities
 # -------------------------
-# ============================================
-def make_scale(*, scheme="redyellowgreen", reverse=False, domain_min=None):
-    kwargs = {"scheme": scheme, "reverse": reverse}
-    # domain_min이 None이면 아예 넣지 않는다 (Altair가 None을 싫어함)
-    if domain_min is not None:
-        kwargs["domainMin"] = float(domain_min)
-    return alt.Scale(**kwargs)
-
-def show_model_comparison() -> None:
-    """Model Comparison Tab - Visualize comparison results"""
-    import altair as alt
-    
-    st.subheader("Model Comparison")
-    
-    # Load results
-    results_path = PROJECT_ROOT / "reports" / "model_comparison" / "comparison_results_latest.parquet"
-    
-    if not results_path.exists():
-        st.warning("Model comparison results not found.")
-        st.info("""
-        **Run comparison first:**
-        ```bash
-        cd ~/qpcr_v2
-        python scripts/model_comparison.py --min_cutoff 10 --max_cutoff 40 --step 5
-        ```
-        """)
-        
-        # Show available models info
-        with st.expander("Available Models"):
-            st.markdown("""
-            | Model | Type | Description |
-            |-------|------|-------------|
-            | XGBoost | Gradient Boosting | Current production model |
-            | LightGBM | Gradient Boosting | Faster, memory efficient |
-            | RandomForest | Ensemble | Stable, interpretable |
-            | Ridge | Linear | Simple baseline |
-            | MLP | Neural Network | Non-linear patterns |
-            | LSTM | Sequence Model | Temporal patterns |
-            | 1D-CNN | Sequence Model | Local pattern detection |
-            """)  
-        return
-    
-    # Load data
-    results = pd.read_parquet(results_path)
-    results = results.fillna({
-     "mae": 0, "rmse": 0, "acc_1.0": 0, "acc_2.0": 0, "fc_1.5x": 0, "train_time": 0
- })
-    results = results.dropna(subset=["mae"])
-    
-    if results.empty:
-        st.error("No valid results found.")
-        return
-    
-    # ========== Summary Cards ==========
-    st.markdown("### Summary")
-    
-    # Best overall model
-    best_overall = results.groupby("model")["mae"].mean().idxmin()
-    best_mae = results.groupby("model")["mae"].mean().min()
-    
-    models_tested = results["model"].nunique()
-    cutoffs_tested = results["cutoff"].nunique()
-    
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Best Model (avg MAE)", best_overall)
-    c2.metric("Best avg MAE", f"{best_mae:.3f}")
-    c3.metric("Models Tested", models_tested)
-    c4.metric("Cutoffs Tested", cutoffs_tested)
-    
-    st.divider()
-    
-    # ========== Metric Selection ==========
-    metric_options = {
-    "MAE": "mae",
-    "RMSE": "rmse",
-    "Accuracy (+-1.0 Ct)": "acc_1.0",
-    "Accuracy (+-2.0 Ct)": "acc_2.0",
-    "Fold-change <=1.5x (%)": "fc_1.5x",
-    "Training Time (s)": "train_time",
-    }
-    
-    # 순서 바꿈: selectbox 먼저 호출
-    selected_metric_name = st.selectbox(
-        "Select Metric",
-        list(metric_options.keys()),
-        index=0,  # 기본 MAE (필요시 4로 바꿔 fc_1.5x 기본)
-        key="comparison_metric"
-    )
-    
-    # 그 다음 selected_metric 정의
-    selected_metric = metric_options[selected_metric_name]
-    
-    # 추가: higher better 판단 (accuracy/fc_1.5x는 높을수록 좋음)
-    higher_better = selected_metric in ["acc_1.0", "acc_2.0", "fc_1.5x"]
-    
-    # ========== 1. Line Chart: Metric vs Cutoff ==========
-    st.markdown(f"### {selected_metric_name} vs Cutoff")
-
-    y_scale = make_scale(domain_min=0 if (higher_better and selected_metric in ["acc_1.0","acc_2.0","fc_1.5x"]) else None)
-    
-    line_chart = alt.Chart(results).mark_line(point=True).encode(
-        x=alt.X("cutoff:Q", title="Cutoff (cycles)"),
-        y=alt.Y(f"{selected_metric}:Q", title=selected_metric_name, scale=y_scale),
-        color=alt.Color("model:N", title="Model"),
-        tooltip=["model", "cutoff", alt.Tooltip(f"{selected_metric}:Q", title=selected_metric_name)]
-    ).properties(height=400).interactive()
-    
-    st.altair_chart(line_chart, use_container_width=True)
-    
-    # ========== 2. Bar Chart: Average by Model ==========
-    st.markdown(f"### Average {selected_metric_name} by Model")
-
-    avg_by_model = results.groupby("model", as_index=False)[selected_metric].mean()
-    avg_by_model = avg_by_model.sort_values(selected_metric, ascending=not higher_better)
-    
-    y_scale = make_scale(domain_min=0 if (higher_better and selected_metric in ["acc_1.0","acc_2.0","fc_1.5x"]) else None)
-    
-    bar_chart = alt.Chart(avg_by_model).mark_bar().encode(
-        x=alt.X("model:N", sort=avg_by_model["model"].tolist(), title="Model"),
-        y=alt.Y(f"{selected_metric}:Q", title=f"Average {selected_metric_name}", scale=y_scale),
-        color=alt.Color("model:N", legend=None),
-        tooltip=["model", alt.Tooltip(f"{selected_metric}:Q", title=f"Average {selected_metric_name}")]
-    ).properties(height=300)
-    
-    st.altair_chart(bar_chart, use_container_width=True)
-
-    
-    # ========== 3. Heatmap: Model x Cutoff ==========
-    st.markdown(f"### Heatmap: {selected_metric_name}")
-
-    heatmap_data = results.copy()
-    
-    # lower is better인 경우: 낮은 값이 "좋음(=green)" 이 되게 reverse=True
-    lower_better_metrics = ["mae", "rmse", "train_time"]
-    reverse = selected_metric in lower_better_metrics
-    
-    color_scale = make_scale(
-        scheme="redyellowgreen",
-        reverse=reverse,
-        domain_min=0  # 안전하게 항상 0부터
-    )
-    
-    heatmap = alt.Chart(heatmap_data).mark_rect().encode(
-        x=alt.X("cutoff:O", title="Cutoff"),
-        y=alt.Y("model:N", title="Model"),
-        color=alt.Color(
-            f"{selected_metric}:Q",
-            title=selected_metric_name,
-            scale=color_scale
-        ),
-        tooltip=["model", "cutoff", alt.Tooltip(f"{selected_metric}:Q", title=selected_metric_name)]
-    ).properties(height=300)
-    
-    text = alt.Chart(heatmap_data).mark_text(baseline="middle", fontSize=10).encode(
-        x=alt.X("cutoff:O"),
-        y=alt.Y("model:N"),
-        text=alt.Text(f"{selected_metric}:Q", format=".2f" if "acc" in selected_metric else ".1f"),
-        color=alt.value("black")
-    )
-    
-    st.altair_chart(heatmap + text, use_container_width=True)
-
-    
-    st.divider()
-    
-    # ========== 4. Best Model per Cutoff ==========
-    st.markdown("### Best Model per Cutoff")
-    
-    # For MAE/RMSE: lower is better, for accuracy: higher is better
-    if selected_metric in ["mae", "rmse", "train_time"]:
-        best_per_cutoff = results.loc[results.groupby("cutoff")[selected_metric].idxmin()]
-    else:
-        best_per_cutoff = results.loc[results.groupby("cutoff")[selected_metric].idxmax()]
-    
-    best_per_cutoff = best_per_cutoff[["cutoff", "model", selected_metric]].sort_values("cutoff")
-    
-    col1, col2 = st.columns([1, 2])
-    
-    with col1:
-        st.dataframe(best_per_cutoff, use_container_width=True, height=300)
-    
-    with col2:
-        winner_counts = best_per_cutoff["model"].value_counts().reset_index()
-        winner_counts.columns = ["model", "wins"]
-        
-        pie = alt.Chart(winner_counts).mark_arc(innerRadius=50).encode(
-            theta=alt.Theta("wins:Q"),
-            color=alt.Color("model:N"),
-            tooltip=["model", "wins"]
-        ).properties(height=250, title="Best Model Wins")
-        
-        st.altair_chart(pie, use_container_width=True)
-    
-    st.divider()
-    
-    # ========== 5. Full Results Table ==========
-    st.markdown("### Full Results Table")
-    
-    with st.expander("Show/Hide Table", expanded=False):
-        display_cols = ["model", "cutoff", "mae", "rmse", "acc_1.0", "acc_2.0", "fc_1.5x", "train_time", "n_samples"]
-        available_cols = [c for c in display_cols if c in results.columns]
-        st.dataframe(results[available_cols].sort_values(["cutoff", "mae"]), use_container_width=True, height=400)
-    
-    # ========== 6. Download ==========
-    st.markdown("### Download Results")
-    
-    csv = results.to_csv(index=False)
-    st.download_button(
-        "Download Results (CSV)",
-        csv.encode(),
-        "model_comparison_results.csv",
-        "text/csv"
-    )
-    
-    # ========== 7. Recommendations ==========
-    st.markdown("### Recommendations")
-    
-    # Find best models for different scenarios
-    best_accuracy = results.groupby("model")["acc_2.0"].mean().idxmax()
-    best_speed = results.groupby("model")["train_time"].mean().idxmin()
-    best_fc = results.groupby("model")["fc_1.5x"].mean().idxmax()
-    
-    rec_col1, rec_col2, rec_col3 = st.columns(3)
-    
-    with rec_col1:
-        st.info(f"""
-        **Best Accuracy**
-        
-        Model: **{best_accuracy}**
-        
-        Highest Acc@2.0 average
-        """)
-    
-    with rec_col2:
-        st.info(f"""
-        **Fastest Training**
-        
-        Model: **{best_speed}**
-        
-        Lowest training time
-        """)
-    
-    with rec_col3:
-        st.info(f"""
-        **Best Fold-change**
-        
-        Model: **{best_fc}**
-        
-        Highest FC<=1.5x ratio
-        """)
-
 def get_reports_root() -> Path:
     # 1) 가장 우선: 레포 루트의 reports/ (Streamlit Cloud 배포용)
     p = Path("reports")
@@ -2679,7 +2424,7 @@ min_c = int(min_c)
 max_c = int(max_c)
 
 # 수정된 코드:
-tabs = st.tabs(["📈 Performance", "📊 Data Catalog", "🧪 Predict", "🧨 Hard Review", "🔬 Model Comparison", "🛠 Retrain"])
+tabs = st.tabs(["📈 Performance", "📊 Data Catalog", "🧪 Predict (Upload)", "🧨 Hard Review", "🛠 Retrain(Admin)"])
 
 with tabs[0]:
     show_train_report()
@@ -3541,20 +3286,12 @@ with tabs[2]:
 # Tab 2: Hard Review
 # -------------------------
 with tabs[3]:
-    use_bucket = st.toggle("버킷 분류 사용", value=True, key="use_bucket_review")
-    
-    if use_bucket:
-        show_hard_review_with_buckets()
-    else:
-        show_hard_review()
-
-with tabs[4]:
-    show_model_comparison()
+    show_hard_review_with_buckets()
 
 # -------------------------
 # Tab 3: Retrain (Admin)
 # -------------------------
-with tabs[5]:
+with tabs[4]:
     st.subheader("2) 누적 반영 후 재학습 (관리자 버튼)")
 
     if running_on_streamlit_cloud():

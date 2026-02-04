@@ -1,34 +1,43 @@
-.venv/
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# venv
+.venv/
+venv/
+ENV/
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Data / models / outputs (너 프로젝트에 맞게 확장)
 data/
-# ✅ allow only model artifacts for Streamlit Cloud
-!data/models/
-!data/models/by_cutoff/
-!data/models/by_cutoff/*.json
-!data/models/by_cutoff/*.meta.json
-
-app/data/
-app/data/reports/
-*.parquet
+datasets/
+raw/
+outputs/
+models/
+checkpoints/
+runs/
+*.pkl
+*.joblib
+*.pt
+*.pth
+*.onnx
+*.h5
 *.csv
-*.xlsx
+*.parquet
 
-# --- allow streamlit cloud artifacts ---
-!reports/
-!reports/active_model.txt
-!reports/train_report.csv
-!reports/**/metrics_by_cutoff.parquet
-!reports/**/predictions_long.parquet
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
 
-# --- allow only model artifacts under data/ ---
-!data/
-!data/models/
-!data/models/by_cutoff/
-!data/models/by_cutoff/*.json
-!data/models/by_cutoff/*.meta.json
-pages/
-pages/
-pages/
-app/pages/
-app/pages/*
+# logs
+*.log
+logs/
