@@ -1,43 +1,23 @@
-# Python
+# python
 __pycache__/
-*.py[cod]
-*.pyo
-*.pyd
-*.so
-.pytest_cache/
-.mypy_cache/
-.ruff_cache/
-
-# venv
+*.pyc
 .venv/
 venv/
-ENV/
 
-# Streamlit
-.streamlit/secrets.toml
+# streamlit / logs
+.streamlit/
+*.log
 
-# Data / models / outputs (너 프로젝트에 맞게 확장)
+# data & artifacts
 data/
-datasets/
-raw/
-outputs/
-models/
-checkpoints/
-runs/
+reports/
+results/
+*.parquet
+*.csv
+*.xlsx
 *.pkl
 *.joblib
 *.pt
 *.pth
-*.onnx
-*.h5
-*.csv
-*.parquet
-
-# OS / editor
-.DS_Store
-.vscode/
-.idea/
-
-# logs
-*.log
-logs/
+*.ckpt
+*.model

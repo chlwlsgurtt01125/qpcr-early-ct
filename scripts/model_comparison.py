@@ -20,7 +20,7 @@ import warnings
 from pathlib import Path
 from datetime import datetime
 from typing import Dict, List, Tuple, Optional
-
+import os
 import numpy as np
 import pandas as pd
 from sklearn.model_selection import GroupKFold, cross_val_predict
@@ -493,6 +493,36 @@ def run_comparison(
                 
                 results.append(metrics)
                 
+                # ---------- progress save (append) ----------
+                BASE_DIR = Path(__file__).resolve().parents[1]      # /home/cphotonic/qpcr_v2
+                RESULTS_DIR = BASE_DIR / "results"
+                RESULTS_DIR.mkdir(parents=True, exist_ok=True)
+                
+                progress_path = RESULTS_DIR / "model_comparison_progress.csv"
+                
+                # row 라는 dict가 이미 있다고 가정 (없으면 아래 예시 참고)
+                df_row = pd.DataFrame([row])
+                
+                # 숫자 컬럼 안전하게 변환 (Altair/Streamlit에서 깨지는 거 방지)
+                for c in ["cutoff","mae","rmse","acc_1.0","acc_2.0","fc_1.5x","train_time","n_samples"]:
+                    if c in df_row.columns:
+                        df_row[c] = pd.to_numeric(df_row[c], errors="coerce")
+                
+                df_row.to_csv(progress_path, mode="a", header=not progress_path.exists(), index=False)
+                # -------------------------------------------
+                        
+                row = {
+                      "model": model_name,
+                      "cutoff": cutoff,
+                      "mae": mae,
+                      "rmse": rmse,
+                      "acc_1.0": acc1,
+                      "acc_2.0": acc2,
+                      "fc_1.5x": fc,
+                      "train_time": train_time,
+                      "n_samples": n_samples
+                  }
+
                 if verbose:
                     print(f"MAE={metrics['mae']:.3f}, Acc@2={metrics['acc_2.0']:.1f}% ({train_time:.1f}s)")
                     

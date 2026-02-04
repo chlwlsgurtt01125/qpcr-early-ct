@@ -23,6 +23,25 @@ from scipy.stats import linregress
 from dataclasses import dataclass
 from enum import Enum
 from typing import Dict, Tuple, Optional, List
+from streamlit_autorefresh import st_autorefresh
+import pandas as pd, os
+
+progress_path = "results/model_comparison_progress.csv"
+
+st_autorefresh(interval=2000, key="refresh")  # 2초마다 새로고침
+
+if os.path.exists(progress_path):
+    results = pd.read_csv(progress_path)
+
+    # 숫자 컬럼 강제 변환(중간에 문자열/None 섞이면 그래프가 깨짐)
+    numeric_cols = ["cutoff","mae","rmse","acc_1.0","acc_2.0","fc_1.5x","train_time","n_samples"]
+    for c in numeric_cols:
+        if c in results.columns:
+            results[c] = pd.to_numeric(results[c], errors="coerce")
+
+    # 여기서 네 show_model_comparison() 로직 태우면 됨
+else:
+    st.info("학습 진행 중… progress 파일 생성 대기")
 
 class HardBucket(Enum):
     """Hard Sample 버킷 종류"""
@@ -163,6 +182,23 @@ UPLOAD_DIR = PROJECT_ROOT / "data" / "uploads"
 # ========================================
 # GitHub Release에서 QC 데이터 자동 다운로드
 # ========================================
+
+def load_model_comparison_results() -> pd.DataFrame | None:
+    BASE_DIR = Path(__file__).resolve().parents[1]  # /home/.../qpcr_v2
+    candidates = [
+        BASE_DIR / "reports" / "model_comparison" / "comparison_results_latest.parquet",
+        BASE_DIR / "reports" / "model_comparison" / "best_models_summary.csv",
+        BASE_DIR / "results" / "model_comparison_progress.csv",
+    ]
+
+    for p in candidates:
+        if p.exists():
+            if p.suffix == ".parquet":
+                return pd.read_parquet(p)
+            if p.suffix == ".csv":
+                return pd.read_csv(p)
+
+    return None
 
 def load_data_catalog(path: Path) -> dict:
     try:
@@ -1719,13 +1755,81 @@ def predict_ct(df_long: pd.DataFrame, cutoff: int) -> pd.DataFrame:
     booster = load_booster(cutoff)
     X, meta = build_x_from_long(df_long, cutoff=cutoff)
 
-    # feature_names mismatch 방지 (meta에 있으면 사용)
-    m = load_meta(cutoff)
+    # --- 1) booster가 기대하는 feature 이름(훈련 피처) 가져오기 ---
+    expected = booster.feature_names
+    if expected is None:
+        # feature_names가 저장 안 된 모델이면, meta에 저장된 feat_cols 사용
+        m = load_meta(cutoff) or {}
+        expected = m.get("feat_cols") or m.get("feature_cols")
+
+    expected = [str(c) for c in expected]
+
+    # --- 2) 현재 X(24 cycle) -> f_cycle_1..f_cycle_24 이름으로 DataFrame 만들기 ---
+    X_df = pd.DataFrame(X, columns=[f"f_cycle_{i+1}" for i in range(X.shape[1])])
+
+    # --- 3) 훈련에 쓰였던 engineered feature 4개 생성 ---
+    # slope10: 마지막 10 cycle의 선형 기울기 (cutoff<10이면 가능한 만큼)
+    k = min(10, X_df.shape[1])
+    y_last = X_df.iloc[:, -k:].values  # (n, k)
+    x_idx = np.arange(k)
+
+    # 각 샘플별 slope 계산
+    slopes = []
+    for row in y_last:
+        # np.polyfit(x, y, 1)[0] == slope
+        slopes.append(np.polyfit(x_idx, row, 1)[0])
+    X_df["f_slope10"] = slopes
+
+    # area: 1..cutoff 구간 면적(여기서는 단순 sum)
+    X_df["f_area"] = X_df.filter(like="f_cycle_").sum(axis=1)
+
+    # max: 최대 형광
+    X_df["f_max"] = X_df.filter(like="f_cycle_").max(axis=1)
+
+    # argmax: 최대가 발생한 cycle index (1-based)
+    X_df["f_argmax"] = X_df.filter(like="f_cycle_").values.argmax(axis=1) + 1
+
+    # --- 4) expected 순서대로 컬럼 정렬 + 누락 컬럼은 0으로 채움 ---
+    for col in expected:
+        if col not in X_df.columns:
+            X_df[col] = 0.0  # 혹시 모를 누락 대비 (안전장치)
+
+    X_df = X_df[expected]
+
+    # --- 5) DMatrix는 DataFrame으로 만들면 feature_names 자동 매칭됨 ---
+    dmat = xgb.DMatrix(X_df)
+
+
+    m = load_meta(cutoff) or {}
     feat_cols = m.get("feat_cols") or m.get("feature_cols")
-    if feat_cols:
-        dmat = xgb.DMatrix(X, feature_names=list(feat_cols))
+
+    # feat_cols가 없으면 그냥 자동 이름으로 가도 됨 (가장 안전)
+    if feat_cols is None:
+        feat_cols = [f"cycle_{i+1}" for i in range(X.shape[1])]
     else:
-        dmat = xgb.DMatrix(X)
+        feat_cols = list(feat_cols)
+
+        # 길이 mismatch면 자동 수정
+        if X.shape[1] != len(feat_cols):
+            st.warning(
+                f"[feature mismatch] X has {X.shape[1]} cols, feat_cols has {len(feat_cols)}. Auto-fixing..."
+            )
+
+            # cycle 후보만 남기기 (숫자/문자 숫자 모두 허용)
+            cycle_cols = []
+            for c in feat_cols:
+                try:
+                    ci = int(c)
+                    if 1 <= ci <= int(cutoff):
+                        cycle_cols.append(ci)
+                except Exception:
+                    pass
+            cycle_cols = sorted(set(cycle_cols))
+
+            if len(cycle_cols) == X.shape[1]:
+                feat_cols = cycle_cols
+            else:
+                feat_cols = [f"cycle_{i+1}" for i in range(X.shape[1])]
 
     pred = booster.predict(dmat)
 
@@ -1733,7 +1837,6 @@ def predict_ct(df_long: pd.DataFrame, cutoff: int) -> pd.DataFrame:
     out["pred_ct"] = pred.astype(float)
     out["cutoff_used"] = cutoff
     return out.sort_values(["run_id", "Well"]).reset_index(drop=True)
-
 
 def run_retrain(min_cutoff: int, max_cutoff: int) -> tuple[int, str]:
     if running_on_streamlit_cloud():
